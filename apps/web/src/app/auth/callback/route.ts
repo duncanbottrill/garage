@@ -1,5 +1,6 @@
 import { env } from "@/lib/env"; import { serviceClient } from "@/lib/supabase"; import { exchangeCode, storeCredentials } from "@/lib/tesla-auth"; import { syncVehicles } from "@/lib/vehicles";
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;
 const back = (q: string) => Response.redirect(env().APP_RETURN_URL + "?" + q, 302);
 export async function GET(req: Request) {
   const u = new URL(req.url); const code = u.searchParams.get("code"), state = u.searchParams.get("state"), teslaError = u.searchParams.get("error");

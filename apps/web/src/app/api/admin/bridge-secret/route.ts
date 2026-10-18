@@ -1,7 +1,7 @@
-import { requireCron, serviceClient } from "@/lib/supabase"; import { hashSecret, newBridgeSecret } from "@/lib/bridge-auth";
+import { requireAdmin, serviceClient } from "@/lib/supabase"; import { hashSecret, newBridgeSecret } from "@/lib/bridge-auth";
 export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
-  if (!requireCron(req)) return new Response("forbidden", { status: 403 });
+  if (!requireAdmin(req)) return new Response("forbidden", { status: 403 });
   const b = await req.json().catch(() => ({})); const owner = String(b.owner_id ?? "");
   if (!/^[0-9a-f-]{36}$/.test(owner)) return Response.json({ error: "bad_owner" }, { status: 400 });
   const secret = newBridgeSecret();

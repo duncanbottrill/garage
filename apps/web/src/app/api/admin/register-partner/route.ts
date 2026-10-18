@@ -1,12 +1,12 @@
-import { requireCron } from "@/lib/supabase";
+import { requireAdmin } from "@/lib/supabase";
 import { TOKEN_URL } from "@/lib/tesla-auth";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 // One-time Tesla partner registration, run from the server so the client secret never leaves Vercel.
-// Guarded by the same secret as the crons. Idempotent: Tesla returns the existing registration on repeat calls.
+// Guarded by the admin secret (separate from the cron secret). Idempotent: Tesla returns the existing registration on repeat calls.
 export async function POST(req: Request) {
-  if (!requireCron(req)) return new Response("forbidden", { status: 403 });
+  if (!requireAdmin(req)) return new Response("forbidden", { status: 403 });
   const clientId = process.env.TESLA_CLIENT_ID, clientSecret = process.env.TESLA_CLIENT_SECRET;
   const fleetBase = process.env.TESLA_FLEET_BASE, redirect = process.env.TESLA_REDIRECT_URI;
   if (!clientId || !clientSecret || !fleetBase || !redirect) return Response.json({ error: "missing_env" }, { status: 500 });

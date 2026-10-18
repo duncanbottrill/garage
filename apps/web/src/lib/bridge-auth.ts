@@ -7,6 +7,7 @@ export async function bridgeOwnerFromRequest(req: Request): Promise<{ id: string
   const sb = serviceClient();
   const { data } = await sb.from("bridge_secrets").select("owner_id").eq("secret_hash", hashSecret(secret)).maybeSingle();
   if (!data) return null;
-  await sb.from("bridge_secrets").update({ last_used_at: new Date().toISOString() }).eq("owner_id", data.owner_id);
+  const { error: touchError } = await sb.from("bridge_secrets").update({ last_used_at: new Date().toISOString() }).eq("owner_id", data.owner_id);
+  if (touchError) console.error("bridge_secrets last_used_at update failed", touchError.message);
   return { id: data.owner_id };
 }

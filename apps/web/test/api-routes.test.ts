@@ -36,6 +36,19 @@ describe("api routes", () => {
     const r = await GET(new Request("http://g/api/token", { headers: { authorization: `Bearer ${jwt2}` } }));
     expect((await r.json()).access_token).toBe("NEW-API");
   });
+  it("token returns 503 token_unavailable when backed off, not 404 not_connected", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    await admin.auth.admin.createUser({ email: "api-unavailable@test.local", password: "pass-1234", email_confirm: true }).catch(() => {});
+    const c = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!);
+    const s = await c.auth.signInWithPassword({ email: "api-unavailable@test.local", password: "pass-1234" });
+    const jwt3 = s.data.session!.access_token; const owner3 = s.data.user!.id;
+    const retryAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    await admin.from("tesla_credentials").upsert({ owner_id: owner3, refresh_token_enc: "\\x00", access_token: "EXPIRED-API", access_expires_at: new Date(Date.now() - 60_000).toISOString(), refresh_failures: 3, next_refresh_at: retryAt });
+    const { GET } = await import("@/app/api/token/route");
+    const r = await GET(new Request("http://g/api/token", { headers: { authorization: `Bearer ${jwt3}` } }));
+    expect(r.status).toBe(503); const body = await r.json();
+    expect(body.error).toBe("token_unavailable"); expect(new Date(body.retry_at).getTime()).toBe(new Date(retryAt).getTime());
+  });
   it("usage increments the ledger", async () => {
     const { POST } = await import("@/app/api/usage/route");
     await POST(new Request("http://g/api/usage", { method: "POST", headers: H(), body: JSON.stringify({ category: "commands", count: 3 }) }));
@@ -83,6 +96,7 @@ describe("api routes", () => {
     const { GET } = await import("@/app/api/connection/route");
     expect((await GET(new Request("http://g/api/connection"))).status).toBe(401);
     const r = await GET(new Request("http://g/api/connection", { headers: H() })); const j = await r.json(); expect(j.connected).toBe(true); expect(j.access_token).toBeUndefined();
+    expect(j.refresh_failures).toBe(0);
   });
   it("allow-list blocks users not listed", async () => {
     try {
@@ -91,6 +105,15 @@ describe("api routes", () => {
       expect((await GET(new Request("http://g/api/token", { headers: H() }))).status).toBe(401);
     } finally {
       delete process.env.ALLOWED_OWNER_IDS;
+    }
+  });
+  it("fails closed on a deployed environment with no allow-list configured", async () => {
+    try {
+      process.env.VERCEL_ENV = "production"; delete process.env.ALLOWED_OWNER_IDS;
+      const { GET } = await import("@/app/api/token/route");
+      expect((await GET(new Request("http://g/api/token", { headers: H() }))).status).toBe(401);
+    } finally {
+      delete process.env.VERCEL_ENV; delete process.env.ALLOWED_OWNER_IDS;
     }
   });
   it("vehicle-data refuses when budget_mode is minimal", async () => {
