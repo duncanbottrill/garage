@@ -663,8 +663,8 @@ export function _resetLimiterForTests() { mem.clear(); }
 - Create: `README.md`
 
 **Steps:**
-- [ ] Apply migrations 0006–0011 to the hosted project through the Supabase connector (controller does this; order matters).
-- [ ] Set Vercel env `ALLOWED_OWNER_IDS=37b3272b-7899-45cf-8956-a156313b12cb` (production + preview).
+- [ ] Apply migrations 0006–0014 to the hosted project through the Supabase connector (controller does this; order matters).
+- [ ] Set Vercel env `ALLOWED_OWNER_IDS=37b3272b-7899-45cf-8956-a156313b12cb` and `ADMIN_SECRET=<generated>` (production + preview).
 - [ ] Merge to main via PR, deploy, verify: `POST /auth/start` → 401 unauth; `GET /api/connection` with the bootstrap JWT → `connected: true`; `GET /api/bridge/token` → 401 without a secret; mint a bridge secret for the owner via the admin route and confirm `GET /api/bridge/token` → 200 (store the secret in `~/.garage/vercel-secrets.env` as `BRIDGE_SECRET=`, for Plan 1B's add-on options).
 - [ ] README: what Garage is, repo layout, local setup (`pnpm install`, `colima start`, `supabase start`, env export line, `pnpm test`), links to spec, plans and runbook.
 - [ ] Commit `docs: 1A.2 spec amendments, runbook, README`.

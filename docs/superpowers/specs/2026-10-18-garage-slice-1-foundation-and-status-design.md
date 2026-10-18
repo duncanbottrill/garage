@@ -70,9 +70,9 @@ Five parts, one job each.
 ### 4.1 Authentication and token custody
 
 - One-time OAuth authorization-code flow with PKCE, started from the app, completed in the browser, landing on the Vercel callback. Scopes: `openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds vehicle_location`.
-- The refresh token is stored in Supabase table `tesla_credentials`, encrypted with pgsodium (column-level), readable only by the service role.
+- The refresh token is stored in Supabase table `tesla_credentials`, encrypted application-side with XChaCha20-Poly1305 (`encryptToken`, `packages/core`) before the write, readable only by the service role.
 - Tesla refresh tokens are single-use. Rotation happens in one place, `refreshAll`, behind a per-owner claim lock; the daily cron and the on-demand path in `/api/token` and `/api/bridge/token` both go through it, so there is at most one rotation per owner at a time.
-- The proxy add-on and the ingest worker fetch the current access token from Supabase (service role) on start and whenever a request returns 401. They never refresh.
+- The proxy add-on and the ingest worker call `GET /api/bridge/token` with their per-owner bridge secret on start and whenever a request returns 401. They never touch `tesla_credentials` directly and never refresh.
 - Partner registration (`POST /api/1/partner_accounts` with the garage domain) is a one-time script in `apps/web/scripts/`, run from the Mac with the client credentials.
 
 ### 4.2 Virtual key
@@ -192,6 +192,14 @@ tesla_credentials(owner_id pk, refresh_token_enc bytea, access_token text, acces
 - Retention: `signals` full resolution 12 months, then a nightly job downsamples to 1-minute medians into `signals_1m` (slice 3 introduces it; the partitioning is in place now).
 - Realtime enabled on `vehicle_state` only.
 
+### 6.1 vehicle_state write contract
+
+- Single write path: `merge_vehicle_state(p_vehicle, p_patch)`. Nothing else writes `vehicle_state` directly.
+- Patch keys overwrite scalars; the jsonb columns `doors`, `windows`, `tpms_bar`, `bridge_health` merge object-wise (existing keys not present in the patch survive).
+- A JSON `null` in the patch means "omit", not "set to null" — fields cannot be cleared this way yet. A `p_clear` parameter is planned for Plan 1B.
+- Door/window keys are `driver_front`, `passenger_front`, `driver_rear`, `passenger_rear` — never the short `fl`/`fr`/`rl`/`rr` form used by early fixtures (migration 0013 strips any leftovers).
+- The row must already exist: callers upsert `{vehicle_id, owner_id}` with `ignoreDuplicates` first, then call `merge_vehicle_state`.
+
 ## 7. Vercel app (`apps/web`)
 
 Next.js (App Router), same conventions as tp-backend. Slice 1 routes:
@@ -199,11 +207,16 @@ Next.js (App Router), same conventions as tp-backend. Slice 1 routes:
 | Route | Purpose |
 |---|---|
 | `GET /.well-known/appspecific/com.tesla.3p.public-key.pem` | static public key |
-| `GET /auth/start` | requires a Supabase JWT; builds the Tesla authorize URL with PKCE, state bound to the Supabase user |
+| `POST /auth/start` | requires a Supabase JWT; builds the Tesla authorize URL with PKCE, state bound to the Supabase user |
 | `GET /auth/callback` | exchanges code, stores encrypted refresh token, redirects to `garage://connected` |
 | `GET /api/token` | returns the current Tesla access token to an authenticated app user for proxy calls (Supabase JWT required; rate-limited via Upstash) |
+| `GET /api/bridge/token` | returns the current Tesla access token to the HA add-on, authenticated by its per-owner bridge secret (`x-bridge-secret`), rate-limited |
+| `POST /api/admin/bridge-secret` | mints (and rotates) a bridge secret for an owner; admin secret |
+| `POST /api/admin/register-partner` | one-time Tesla partner registration; admin secret |
 | `POST /api/usage` | app reports commands/wakes for the ledger |
 | `POST /api/vehicle-data` | manual refresh (section 4.6) |
+| `POST /api/vehicles/sync` | re-syncs the owner's vehicles from Tesla |
+| `GET /api/connection` | token/connection health for the caller (section 10) |
 | `GET /api/cron/tesla-refresh`, `GET /api/cron/budget` | crons (Vercel Cron, secret header) |
 
 ### 7.2 Why the app fetches the Tesla token from Vercel
@@ -247,7 +260,8 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 - Private key only on the Green; refresh token only in Supabase (encrypted); the app holds a Supabase session and a short-lived Tesla access token in memory. A leaked access token cannot move the car: 2021+ vehicles reject unsigned commands and the signing key is only on the Green.
 - RLS on every table from migration 0001.
 - Proxy bound to the tailnet interface; Funnel exposes only the telemetry receiver, which enforces Tesla client-certificate mTLS.
-- Vercel routes require a Supabase JWT; crons require a secret header; Upstash rate limits on `/api/token`, `/api/vehicle-data`, `/api/usage`.
+- Vercel routes require a Supabase JWT; crons require a secret header; Upstash rate limits on `/api/token`, `/api/vehicle-data`, `/api/usage`, with an in-memory fallback limiter when Upstash env vars are absent (local dev and tests), so rate limiting degrades rather than disappears.
+- Admin routes (`/api/admin/bridge-secret`, `/api/admin/register-partner`) require a separate `ADMIN_SECRET` bearer header, distinct from `CRON_SECRET`, so a leaked cron secret cannot mint bridge secrets or re-run partner registration.
 - Repo is public-safe: no secrets; `.env.example` and HA options only.
 
 ## 12. Testing
