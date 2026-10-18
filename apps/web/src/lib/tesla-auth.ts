@@ -19,6 +19,7 @@ export async function exchangeCode(o: { code: string; verifier: string; fetch?: 
 export async function storeCredentials(ownerId: string, t: TokenSet) {
   const e = env(); const sb = serviceClient();
   const { error } = await sb.from("tesla_credentials").upsert({ owner_id: ownerId, refresh_token_enc: "\\x" + Buffer.from(encryptToken(t.refresh_token, e.TOKEN_ENC_KEY)).toString("hex"),
-    access_token: t.access_token, access_expires_at: new Date(Date.now() + t.expires_in * 1000).toISOString(), rotated_at: new Date().toISOString(), last_error: null });
+    access_token: t.access_token, access_expires_at: new Date(Date.now() + t.expires_in * 1000).toISOString(), rotated_at: new Date().toISOString(), last_error: null,
+    refresh_failures: 0, next_refresh_at: null, refresh_lock_until: null });
   if (error) throw error;
 }

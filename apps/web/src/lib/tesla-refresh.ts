@@ -44,7 +44,7 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
       .update({ refresh_lock_until: lockUntilIso })
       .eq("owner_id", row.owner_id)
       .or("refresh_lock_until.is.null,refresh_lock_until.lt." + nowIso)
-      .select("owner_id, refresh_token_enc, access_expires_at, refresh_failures");
+      .select("owner_id, refresh_token_enc, access_expires_at, refresh_failures, next_refresh_at");
     if (claimError) {
       // Per-row failure, not fatal to the whole sweep — move on to the next candidate.
       failed.push({ owner_id: row.owner_id, error: `claim_failed: ${String((claimError as any)?.message ?? claimError)}` });
@@ -56,7 +56,16 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
       failed.push({ owner_id: row.owner_id, error: "locked" });
       continue;
     }
-    const claimedRow = claimed[0] as { owner_id: string; refresh_token_enc: unknown; access_expires_at: string | null; refresh_failures: number | null };
+    const claimedRow = claimed[0] as { owner_id: string; refresh_token_enc: unknown; access_expires_at: string | null; refresh_failures: number | null; next_refresh_at: string | null };
+    // Backoff re-check now that we hold the lock: mirrors the pre-claim skip above, for the
+    // case where another caller set next_refresh_at between our pre-claim read and our win of
+    // the lock (e.g. that caller's own failed attempt released the lock just before us).
+    if (claimedRow.next_refresh_at && new Date(claimedRow.next_refresh_at).getTime() > claimNow.getTime()) {
+      skipped.push(row.owner_id);
+      const { error: relErr } = await sb.from("tesla_credentials").update({ refresh_lock_until: null }).eq("owner_id", row.owner_id).eq("refresh_lock_until", lockUntilIso);
+      if (relErr) console.error("tesla-refresh: failed to release lock", { owner_id: row.owner_id, error: relErr.message });
+      continue;
+    }
     // Re-check staleness now that we hold the lock: the row may have just been rotated by
     // whoever held the lock before us, in which case it is no longer due and must not be
     // rotated again with a (now-consumed) refresh token.
@@ -80,7 +89,7 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
       const updatePayload = { refresh_token_enc: "\\x" + Buffer.from(encryptToken(t.refresh_token, e.TOKEN_ENC_KEY)).toString("hex"),
         access_token: t.access_token, access_expires_at: new Date(claimNow.getTime() + t.expires_in * 1000).toISOString(), rotated_at: claimNow.toISOString(), last_error: null,
         refresh_failures: 0, next_refresh_at: null };
-      let stored = false, lastStoreError: unknown = null;
+      let stored = false, lastStoreError: unknown = null, tokenChanged = false;
       const storeDelays = [0, ...STORE_RETRY_DELAYS_MS];
       for (const delay of storeDelays) {
         if (delay > 0) await sleep(delay);
@@ -90,13 +99,24 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
         // and a late store must still land, whereas if refresh_token_enc has changed, someone
         // else has already re-authed or rotated this row with a token that is valid for them, and
         // overwriting it would discard that. Supabase reports a zero-row match as success with no
-        // error, so the row count from .select() is the only way to detect it. Treat zero rows as
-        // a store failure for this attempt: it will retry (and ultimately report rotated_unstored)
-        // rather than silently discarding Tesla's already-issued new token pair.
+        // error, so the row count from .select() is the only way to detect it.
         const { data: ud, error: ue } = await sb.from("tesla_credentials").update(updatePayload)
           .select("owner_id").eq("refresh_token_enc", claimedRow.refresh_token_enc as string).eq("owner_id", row.owner_id);
         if (!ue && ud?.length === 1) { stored = true; break; }
-        lastStoreError = ue ?? new Error("token_changed: refresh_token_enc no longer matches the consumed token");
+        if (!ue && (ud?.length ?? 0) === 0) {
+          // Someone else has already re-authed or rotated this row out from under us. This is
+          // not a storage failure to retry — the row now belongs to that other write, and
+          // retrying or recording backoff/last_error against it would stomp on a valid update
+          // that just isn't ours. Stop immediately and let the outer handling report it as a
+          // benign outcome, without going through the catch block's failure bookkeeping.
+          tokenChanged = true;
+          break;
+        }
+        lastStoreError = ue;
+      }
+      if (tokenChanged) {
+        failed.push({ owner_id: row.owner_id, error: "token_changed" });
+        continue;
       }
       if (!stored) {
         console.error("tesla-refresh: rotated but unstored", { owner_id: row.owner_id });
@@ -108,11 +128,15 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
       try {
         const n = (claimedRow.refresh_failures ?? 0) + 1;
         const backoffMs = Math.min(2 ** n * 60_000, 6 * 3600_000);
+        // Fenced on the consumed refresh token too, not just owner_id: if the token changed
+        // underneath us between the claim and this catch (e.g. a concurrent re-auth), this
+        // becomes a no-op rather than stamping failure bookkeeping onto a row someone else
+        // has since validly updated.
         const { error: le } = await sb.from("tesla_credentials").update({
           last_error: String(err?.message ?? err).slice(0, 500),
           refresh_failures: n,
           next_refresh_at: new Date(claimNow.getTime() + backoffMs).toISOString(),
-        }).eq("owner_id", row.owner_id);
+        }).eq("owner_id", row.owner_id).eq("refresh_token_enc", claimedRow.refresh_token_enc as string);
         if (le) throw le;
       } catch (lastErrorErr: any) {
         console.error("tesla-refresh: failed to record last_error", { owner_id: row.owner_id, error: String(lastErrorErr?.message ?? lastErrorErr) });

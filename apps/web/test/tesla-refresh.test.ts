@@ -214,6 +214,54 @@ describe("refreshAll", () => {
     expect(r2.skipped).toContain(owner);
   });
 
+  it("a token_changed store outcome is reported without backoff or last_error", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    const owner = await makeOwner(admin, "fence-token-changed@test.local"); backoffOwners.push(owner);
+    const due = new Date().toISOString();
+    await admin.from("tesla_credentials").upsert({ owner_id: owner, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-TC1", KEY)).toString("hex"), access_token: "tc1", access_expires_at: due, refresh_failures: 0, next_refresh_at: null, last_error: null });
+    // On the FIRST store update() (identified by the payload carrying access_token), simulate a
+    // concurrent re-auth: rotate refresh_token_enc on the real row before letting the real
+    // (token-fenced) update run. Its WHERE clause then matches zero rows, which is exactly the
+    // token_changed case — no retry, no backoff, no last_error — and the re-authed value must survive.
+    let intercepted = false;
+    const client = new Proxy(admin, { get(t, p, r) {
+      if (p !== "from") return Reflect.get(t, p, r);
+      return (table: string) => {
+        const q: any = (t as any).from(table);
+        if (table !== "tesla_credentials") return q;
+        const origUpdate = q.update.bind(q);
+        q.update = (values: any) => {
+          const u: any = origUpdate(values);
+          if (!intercepted && "access_token" in values) {
+            intercepted = true;
+            const origThen = u.then.bind(u);
+            u.then = (resolve: any, reject: any) =>
+              admin.from("tesla_credentials")
+                .update({ refresh_token_enc: "\\x" + Buffer.from(encryptToken("RE-AUTHED", KEY)).toString("hex") })
+                .eq("owner_id", owner)
+                .then(() => origThen(resolve, reject));
+          }
+          return u;
+        };
+        return q;
+      };
+    } }) as SupabaseClient;
+    const { refreshAll } = await import("@/lib/tesla-refresh");
+    const f = vi.fn(async () => new Response(JSON.stringify({ access_token: "TC2", refresh_token: "RT-TC2", expires_in: 28800 }), { status: 200 }));
+    const r = await refreshAll({ fetch: f as any, client, sleep: async () => {}, ownerId: owner });
+    expect(r.failed).toContainEqual({ owner_id: owner, error: "token_changed" });
+    expect(r.rotated).not.toContain(owner);
+    expect(f).toHaveBeenCalledTimes(1);
+    const { data } = await admin.from("tesla_credentials").select("last_error, refresh_failures, next_refresh_at, refresh_lock_until, refresh_token_enc").eq("owner_id", owner).single();
+    expect(data?.last_error).toBeNull();
+    expect(data?.refresh_failures).toBe(0);
+    expect(data?.next_refresh_at).toBeNull();
+    expect(data?.refresh_lock_until).toBeNull();
+    const hex = String(data!.refresh_token_enc).replace(/^\\x/, "");
+    const { decryptToken } = await import("@garage/core");
+    expect(decryptToken(new Uint8Array(Buffer.from(hex, "hex")), KEY)).toBe("RE-AUTHED");
+  });
+
   it("a successful rotation resets backoff", async () => {
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     const owner = await makeOwner(admin, "fence-reset@test.local"); backoffOwners.push(owner);
@@ -224,6 +272,18 @@ describe("refreshAll", () => {
     const f = vi.fn(async () => new Response(JSON.stringify({ access_token: "RS2", refresh_token: "RT-RS2", expires_in: 28800 }), { status: 200 }));
     const r = await refreshAll({ fetch: f as any, client: admin, sleep: async () => {}, ownerId: owner });
     expect(r.rotated).toContain(owner);
+    const { data } = await admin.from("tesla_credentials").select("refresh_failures, next_refresh_at").eq("owner_id", owner).single();
+    expect(data?.refresh_failures).toBe(0);
+    expect(data?.next_refresh_at).toBeNull();
+  });
+
+  it("storeCredentials resets backoff", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    const owner = await makeOwner(admin, "storecreds-reset@test.local"); backoffOwners.push(owner);
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    await admin.from("tesla_credentials").upsert({ owner_id: owner, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-SC1", KEY)).toString("hex"), access_token: "sc1", access_expires_at: future, refresh_failures: 5, next_refresh_at: future });
+    const { storeCredentials } = await import("@/lib/tesla-auth");
+    await storeCredentials(owner, { access_token: "A", refresh_token: "R", expires_in: 28800 });
     const { data } = await admin.from("tesla_credentials").select("refresh_failures, next_refresh_at").eq("owner_id", owner).single();
     expect(data?.refresh_failures).toBe(0);
     expect(data?.next_refresh_at).toBeNull();
