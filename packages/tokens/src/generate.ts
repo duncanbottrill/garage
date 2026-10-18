@@ -26,7 +26,7 @@ export function generateSwift(t: Tokens): string {
   out.push("  }", "  public enum Radius {"); for (const [k, v] of Object.entries(t.radius)) out.push(`    public static let ${k}: CGFloat = ${v}`);
   out.push("  }", "  public enum Space {"); for (const [k, v] of Object.entries(t.space)) out.push(`    public static let ${k}: CGFloat = ${v}`);
   out.push("  }", "  public enum Blur {"); for (const [k, v] of Object.entries(t.blur)) out.push(`    public static let ${k}: CGFloat = ${v}`);
-  out.push("  }", "  public struct TextStyle { public let family: String; public let weight: Font.Weight; public let size: CGFloat; public let lineHeight: CGFloat; public let tracking: CGFloat }", "  public enum Type {");
+  out.push("  }", "  public struct TextStyle { public let family: String; public let weight: Font.Weight; public let size: CGFloat; public let lineHeight: CGFloat; public let tracking: CGFloat }", "  public enum Typography {");
   const w = (n: number) => (n >= 600 ? ".semibold" : n >= 500 ? ".medium" : ".regular");
   for (const [k, s] of Object.entries(t.type.scale)) { const role = (t.type as any)[s.role]; out.push(`    public static let ${k} = TextStyle(family: "${role.family}", weight: ${w(role.weight)}, size: ${s.size}, lineHeight: ${s.lineHeight}, tracking: ${s.tracking})`); }
   out.push("  }", "}", ""); return out.join("\n");
