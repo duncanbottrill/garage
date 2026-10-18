@@ -1,8 +1,9 @@
 import { createPkce, newState } from "@/lib/pkce"; import { authorizeUrl } from "@/lib/tesla-auth"; import { serviceClient, userFromRequest } from "@/lib/supabase";
 export const dynamic = "force-dynamic";
-export async function GET(req: Request) {
-  const user = await userFromRequest(req); if (!user) return new Response("unauthorized", { status: 401 });
+export function GET() { return new Response("use POST", { status: 405, headers: { allow: "POST" } }); }
+export async function POST(req: Request) {
+  const user = await userFromRequest(req); if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
   const { verifier, challenge } = createPkce(); const state = newState();
-  const { error } = await serviceClient().from("oauth_states").insert({ state, owner_id: user.id, verifier }); if (error) return new Response("state store failed", { status: 500 });
-  return Response.redirect(authorizeUrl(challenge, state), 302);
+  const { error } = await serviceClient().from("oauth_states").insert({ state, owner_id: user.id, verifier }); if (error) return Response.json({ error: "state_store_failed" }, { status: 500 });
+  return Response.json({ url: authorizeUrl(challenge, state) }, { headers: { "cache-control": "no-store" } });
 }

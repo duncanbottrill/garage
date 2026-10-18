@@ -9,11 +9,12 @@ beforeAll(async () => {
   const s = await c.auth.signInWithPassword({ email: "auth@test.local", password: "pass-1234" }); jwt = s.data.session!.access_token; ownerId = s.data.user!.id;
 });
 describe("auth routes", () => {
-  it("start requires a user", async () => { const { GET } = await import("@/app/auth/start/route"); expect((await GET(new Request("http://g/auth/start"))).status).toBe(401); });
-  it("start redirects to Tesla and stores state", async () => {
-    const { GET } = await import("@/app/auth/start/route");
-    const r = await GET(new Request("http://g/auth/start", { headers: { authorization: `Bearer ${jwt}` } }));
-    expect(r.status).toBe(302); const loc = new URL(r.headers.get("location")!); expect(loc.host).toBe("auth.tesla.com");
+  it("start requires a user", async () => { const { POST } = await import("@/app/auth/start/route"); expect((await POST(new Request("http://g/auth/start", { method: "POST" }))).status).toBe(401); });
+  it("start returns the Tesla url as JSON and stores state", async () => {
+    const { POST, GET } = await import("@/app/auth/start/route");
+    expect((await GET()).status).toBe(405);
+    const r = await POST(new Request("http://g/auth/start", { method: "POST", headers: { authorization: `Bearer ${jwt}` } }));
+    expect(r.status).toBe(200); const { url } = await r.json(); const loc = new URL(url); expect(loc.host).toBe("auth.tesla.com");
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     const { data } = await admin.from("oauth_states").select("owner_id").eq("state", loc.searchParams.get("state")!).single(); expect(data?.owner_id).toBe(ownerId);
   });
