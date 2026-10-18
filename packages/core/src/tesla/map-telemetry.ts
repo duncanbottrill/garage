@@ -26,6 +26,15 @@ export function telemetrySignalToState(name: string, value: unknown, at: Date): 
       if (n == null) return {}; const k = name.slice(-2).toLowerCase(); return { tpms_bar: { [k]: n } as any }; // bar already in telemetry
     }
     case "SoftwareUpdateVersion": return { software_version: String(value) };
+    case "DoorState": {
+      const open = (k: string) => typeof value === "object" && value !== null ? !!(value as any)[k] : String(value).split("|").includes(k);
+      return { doors: { driver_front: open("DriverFront"), passenger_front: open("PassengerFront"), driver_rear: open("DriverRear"), passenger_rear: open("PassengerRear") }, frunk_open: open("TrunkFront"), trunk_open: open("TrunkRear"), body_at: iso };
+    }
+    case "FdWindow": case "FpWindow": case "RdWindow": case "RpWindow": {
+      const key = ({ Fd: "driver_front", Fp: "passenger_front", Rd: "driver_rear", Rp: "passenger_rear" } as const)[name.slice(0, 2) as "Fd" | "Fp" | "Rd" | "Rp"];
+      return { windows: { [key]: value !== "WindowStateClosed" && value !== false } as any };
+    }
+    case "ChargeAmps": return n == null ? {} : { charge_amps: n };
     default: return {};
   }
 }

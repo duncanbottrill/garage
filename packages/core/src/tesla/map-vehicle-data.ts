@@ -23,9 +23,10 @@ export function vehicleDataToState(p: VehicleDataResponse, at: Date): Partial<Ve
   if (ds.shift_state !== undefined) out.gear = ds.shift_state ?? "P";
   if (vs.odometer != null) out.odometer_km = milesToKm(vs.odometer);
   if (vs.locked != null) { out.locked = !!vs.locked; out.body_at = iso; }
-  if (vs.df != null) out.doors = { fl: !!vs.df, fr: !!vs.pf, rl: !!vs.dr, rr: !!vs.pr };
-  if (vs.fd_window != null) out.windows = { fl: !!vs.fd_window, fr: !!vs.fp_window, rl: !!vs.rd_window, rr: !!vs.rp_window };
+  if (vs.df != null) out.doors = { driver_front: !!vs.df, passenger_front: !!vs.pf, driver_rear: !!vs.dr, passenger_rear: !!vs.pr };
+  if (vs.fd_window != null) out.windows = { driver_front: !!vs.fd_window, passenger_front: !!vs.fp_window, driver_rear: !!vs.rd_window, passenger_rear: !!vs.rp_window };
   if (vs.ft != null) out.frunk_open = !!vs.ft; if (vs.rt != null) out.trunk_open = !!vs.rt;
+  if (cs.charge_amps != null) out.charge_amps = cs.charge_amps;
   if (vs.tpms_pressure_fl != null) out.tpms_bar = { fl: vs.tpms_pressure_fl, fr: vs.tpms_pressure_fr, rl: vs.tpms_pressure_rl, rr: vs.tpms_pressure_rr };
   if (vs.sentry_mode != null) out.sentry = !!vs.sentry_mode;
   if (vs.car_version != null) out.software_version = String(vs.car_version).split(" ")[0];
