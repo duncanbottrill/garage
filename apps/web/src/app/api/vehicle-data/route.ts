@@ -9,7 +9,8 @@ export async function POST(req: Request) {
   if (!v?.tesla_vehicle_id) return Response.json({ error: "no_vehicle" }, { status: 404 });
   const t = await currentAccessToken(u.id); if (!t) return Response.json({ error: "not_connected" }, { status: 404 });
   const fleet = new FleetClient({ baseUrl: env().TESLA_FLEET_BASE, token: t.token });
-  await sb.rpc("increment_usage", { p_owner: u.id, p_category: "data", p_count: 1 });
+  const { error: ledgerError } = await sb.rpc("increment_usage", { p_owner: u.id, p_category: "data", p_count: 1 });
+  if (ledgerError) return Response.json({ error: "ledger_unavailable" }, { status: 503 }); // never make an unlogged billable call
   try {
     const payload = await fleet.get<any>(`/api/1/vehicles/${v.tesla_vehicle_id}/vehicle_data?endpoints=${encodeURIComponent("charge_state;climate_state;drive_state;vehicle_state")}`);
     const state = vehicleDataToState(payload, new Date());
