@@ -1,0 +1,7 @@
+{ "state": "online",
+  "charge_state": { "battery_level": 72, "battery_range": 214.3, "charging_state": "Stopped", "charger_power": 0, "charge_limit_soc": 80, "charge_port_door_open": true },
+  "climate_state": { "inside_temp": 19.2, "outside_temp": 11.0, "is_climate_on": false, "climate_keeper_mode": "off" },
+  "drive_state": { "latitude": 51.5013, "longitude": -0.1419, "heading": 182, "speed": null, "shift_state": null },
+  "vehicle_state": { "odometer": 5227.33, "locked": true, "df": 0, "pf": 0, "dr": 0, "pr": 0, "ft": 0, "rt": 0,
+    "fd_window": 0, "fp_window": 0, "rd_window": 0, "rp_window": 0,
+    "tpms_pressure_fl": 2.9, "tpms_pressure_fr": 2.9, "tpms_pressure_rl": 2.85, "tpms_pressure_rr": 2.9, "sentry_mode": false, "car_version": "2026.32.5 abc123" } }
