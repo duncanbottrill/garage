@@ -21,4 +21,13 @@ describe("auth routes", () => {
     const { GET } = await import("@/app/auth/callback/route");
     const r = await GET(new Request("http://g/auth/callback?code=x&state=nope")); expect(r.headers.get("location")).toContain("error=bad_state");
   });
+  it("callback consumes the state even when Tesla sends no code (consent denied)", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    await admin.from("oauth_states").insert({ state: "denied-state", owner_id: ownerId, verifier: "v" });
+    const { GET } = await import("@/app/auth/callback/route");
+    const r = await GET(new Request("http://g/auth/callback?state=denied-state&error=access_denied"));
+    expect(r.headers.get("location")).toContain("error=access_denied");
+    const { data } = await admin.from("oauth_states").select("state").eq("state", "denied-state");
+    expect(data).toEqual([]);
+  });
 });
