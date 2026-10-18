@@ -3,10 +3,11 @@ import { env } from "@/lib/env"; import { serviceClient, userFromRequest } from 
 export const dynamic = "force-dynamic"; export const maxDuration = 30;
 export async function POST(req: Request) {
   const u = await userFromRequest(req); if (!u) return Response.json({ error: "unauthorized" }, { status: 401 });
-  if (!(await limit("vehicle-data", u.id)).ok) return Response.json({ error: "rate_limited" }, { status: 429 });
+  if (!(await limit("vehicle-data", u.id, { perMinute: 2, perDay: 40 })).ok) return Response.json({ error: "rate_limited" }, { status: 429 });
   const { vehicle_id } = await req.json().catch(() => ({})); const sb = serviceClient();
-  const { data: v } = await sb.from("vehicles").select("id, vin").eq("id", vehicle_id).eq("owner_id", u.id).maybeSingle();
+  const { data: v } = await sb.from("vehicles").select("id, vin, budget_mode").eq("id", vehicle_id).eq("owner_id", u.id).maybeSingle();
   if (!v?.vin) return Response.json({ error: "no_vehicle" }, { status: 404 });
+  if (v.budget_mode === "minimal") return Response.json({ error: "budget_minimal" }, { status: 429 });
   const t = await currentAccessToken(u.id); if (!t) return Response.json({ error: "not_connected" }, { status: 404 });
   const fleet = new FleetClient({ baseUrl: env().TESLA_FLEET_BASE, token: t.token });
   const { error: ledgerError } = await sb.rpc("increment_usage", { p_owner: u.id, p_category: "data", p_count: 1 });

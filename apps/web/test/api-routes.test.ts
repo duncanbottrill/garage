@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeAll, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi, afterEach } from "vitest";
 import { createClient } from "@supabase/supabase-js";
 import { encryptToken } from "@garage/core";
 let jwt = "", ownerId = "", vehicleId = "";
+beforeEach(async () => { const { _resetLimiterForTests } = await import("@/lib/ratelimit"); _resetLimiterForTests(); });
 beforeAll(async () => {
   Object.assign(process.env, { TESLA_CLIENT_ID: "cid", TESLA_CLIENT_SECRET: "sec", TESLA_REDIRECT_URI: "https://g/cb", TESLA_FLEET_BASE: "https://fleet.test", TOKEN_ENC_KEY: Buffer.alloc(32, 1).toString("base64"), CRON_SECRET: "c", APP_RETURN_URL: "garage://x" });
   const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
@@ -82,5 +83,22 @@ describe("api routes", () => {
     const { GET } = await import("@/app/api/connection/route");
     expect((await GET(new Request("http://g/api/connection"))).status).toBe(401);
     const r = await GET(new Request("http://g/api/connection", { headers: H() })); const j = await r.json(); expect(j.connected).toBe(true); expect(j.access_token).toBeUndefined();
+  });
+  it("allow-list blocks users not listed", async () => {
+    try {
+      process.env.ALLOWED_OWNER_IDS = "00000000-0000-0000-0000-000000000000";
+      const { GET } = await import("@/app/api/token/route");
+      expect((await GET(new Request("http://g/api/token", { headers: H() }))).status).toBe(401);
+    } finally {
+      delete process.env.ALLOWED_OWNER_IDS;
+    }
+  });
+  it("vehicle-data refuses when budget_mode is minimal", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    await admin.from("vehicles").update({ budget_mode: "minimal" }).eq("id", vehicleId);
+    const { POST } = await import("@/app/api/vehicle-data/route");
+    const r = await POST(new Request("http://g/api/vehicle-data", { method: "POST", headers: H(), body: JSON.stringify({ vehicle_id: vehicleId }) }));
+    expect(r.status).toBe(429); expect((await r.json()).error).toBe("budget_minimal");
+    await admin.from("vehicles").update({ budget_mode: "normal" }).eq("id", vehicleId);
   });
 });
