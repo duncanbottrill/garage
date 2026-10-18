@@ -70,10 +70,29 @@ describe("row level security", () => {
     const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
     const { error } = await a.client.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 1 } }); expect(error).not.toBeNull();
   });
-  it("ensure_signals_partitions creates and secures missing months", async () => {
-    const { data: n } = await admin.rpc("ensure_signals_partitions", { p_months_ahead: 20 }); expect(Number(n)).toBeGreaterThanOrEqual(6);
-    const far = new Date(); far.setUTCMonth(far.getUTCMonth() + 19); const name = "signals_" + far.toISOString().slice(0, 7).replace("-", "");
-    const anon = createClient(process.env.SUPABASE_URL ?? "http://127.0.0.1:54321", process.env.SUPABASE_ANON_KEY!);
-    const { data, error } = await anon.from(name).select("*"); expect((data ?? []).length).toBe(0); // denied or empty, never rows
+  it("ensure_signals_partitions secures a far-future partition: anon is denied, other users see nothing, the owner reads it via the parent", async () => {
+    const { error: rpcError } = await admin.rpc("ensure_signals_partitions", { p_months_ahead: 20 });
+    expect(rpcError).toBeNull();
+
+    const now = new Date();
+    const far = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 19, 1));
+    const partitionName = "signals_" + far.toISOString().slice(0, 7).replace("-", "");
+    const recordedAt = new Date(Date.UTC(far.getUTCFullYear(), far.getUTCMonth(), 2)).toISOString();
+
+    await admin.from("signals").insert({ vehicle_id: vehicleId, owner_id: a.id, name: "Soc", value_num: 1, recorded_at: recordedAt });
+    try {
+      const anon = createClient(process.env.SUPABASE_URL ?? "http://127.0.0.1:54321", process.env.SUPABASE_ANON_KEY!, { auth: { persistSession: false } });
+      const { data: anonData, error: anonError } = await anon.from(partitionName).select("*");
+      expect(anonError).not.toBeNull();
+      expect(anonData ?? []).toHaveLength(0);
+
+      const { data: bData } = await b.client.from("signals").select("*").eq("vehicle_id", vehicleId).eq("recorded_at", recordedAt);
+      expect(bData).toEqual([]);
+
+      const { data: aData } = await a.client.from("signals").select("*").eq("vehicle_id", vehicleId).eq("recorded_at", recordedAt);
+      expect(aData?.length).toBe(1);
+    } finally {
+      await admin.from("signals").delete().eq("vehicle_id", vehicleId).eq("name", "Soc").eq("recorded_at", recordedAt);
+    }
   });
 });

@@ -10,8 +10,8 @@ declare d date := date_trunc('month', now())::date; i int; nm text; created int 
 begin
   for i in 0..p_months_ahead loop
     nm := 'signals_' || to_char(d + (i||' month')::interval, 'YYYYMM');
-    if not exists (select 1 from pg_class where relname = nm) then
-      execute format('create table %I partition of signals for values from (%L) to (%L)', nm, d + (i||' month')::interval, d + ((i+1)||' month')::interval);
+    if not exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname = nm) then
+      execute format('create table public.%I partition of public.signals for values from (%L) to (%L)', nm, d + (i||' month')::interval, d + ((i+1)||' month')::interval);
       perform public.secure_signals_partition(nm);
       created := created + 1;
     end if;
@@ -22,7 +22,7 @@ revoke execute on function public.ensure_signals_partitions(int) from public, an
 
 do $$ begin
   create extension if not exists pg_cron;
-exception when undefined_file or insufficient_privilege then
+exception when feature_not_supported or undefined_file or insufficient_privilege then
   raise notice 'pg_cron extension not available here; schedule signals-partitions manually';
 end $$;
 
