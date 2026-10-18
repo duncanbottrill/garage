@@ -65,12 +65,15 @@ describe("currentAccessToken lazy refresh", () => {
     await admin.from("tesla_credentials").upsert({ owner_id: id, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-H", KEY)).toString("hex"), access_token: "OLD-H", access_expires_at: new Date(Date.now() + 10 * 60_000).toISOString() });
     const { currentAccessToken } = await import("@/lib/credentials");
     const f = vi.fn(async () => new Response(JSON.stringify({ access_token: "NEW-H", refresh_token: "RT-H2", expires_in: 28800 }), { status: 200 }));
-    // Deterministic even though both callers race for the lock: the loser either observes
-    // "locked" and polls for the winner's fresh row, or — if it claims after the winner has
-    // already released — re-checks the claimed row's staleness inside the lock and skips.
+    // Correct under either race outcome, even though both callers race for the lock: the
+    // loser either observes "locked" and polls for the winner's fresh row, or — if it claims
+    // after the winner has already released — re-checks the claimed row's staleness inside
+    // the lock and skips. Use a real (short) sleep rather than an instant one so the loser
+    // actually yields between re-reads instead of busy-spinning past the winner's write.
+    const slowSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, 25));
     const [a, b] = await Promise.all([
-      currentAccessToken(id, { fetch: f as any, sleep: fastSleep }),
-      currentAccessToken(id, { fetch: f as any, sleep: fastSleep }),
+      currentAccessToken(id, { fetch: f as any, sleep: slowSleep }),
+      currentAccessToken(id, { fetch: f as any, sleep: slowSleep }),
     ]);
     expect(f).toHaveBeenCalledTimes(1);
     expect(a?.token).toBe("NEW-H");
@@ -99,7 +102,7 @@ describe("currentAccessToken lazy refresh", () => {
     // claim UPDATE...RETURNING) hitting the real, already-rotated row. With the fix, B's claim
     // still succeeds (A released the lock), but the re-check inside the lock sees the claimed
     // row is fresh and skips instead of rotating again with A's already-consumed token.
-    const staleSnapshot = { owner_id: id, access_token: "OLD-J", access_expires_at: staleExpiresAt };
+    const staleSnapshot = { owner_id: id, access_token: "OLD-J", access_expires_at: staleExpiresAt, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-J1", KEY)).toString("hex") };
     let staleSelectsLeft = 2;
     const bClient = new Proxy(admin, {
       get(t, p, r) {

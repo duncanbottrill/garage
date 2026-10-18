@@ -6,7 +6,7 @@ const LOCK_DURATION_MS = 90_000;
 const DEFAULT_REFRESH_WITHIN_MS = 3 * 3600_000; // cron sweep: refresh when less than 3h of access remains
 const TESLA_FETCH_TIMEOUT_MS = 20_000;
 export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?: SupabaseClient; sleep?: (ms: number) => Promise<void>; ownerId?: string; refreshWithinMs?: number } = {}) {
-  const e = env(); const f = o.fetch ?? fetch; const now = o.now ?? new Date(); const sb = o.client ?? serviceClient();
+  const e = env(); const f = o.fetch ?? fetch; const sb = o.client ?? serviceClient();
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const refreshWithinMs = o.refreshWithinMs ?? DEFAULT_REFRESH_WITHIN_MS;
   const rotated: string[] = [], failed: { owner_id: string; error: string }[] = [], skipped: string[] = [];
@@ -18,16 +18,21 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
   if (o.ownerId) q = q.eq("owner_id", o.ownerId);
   const { data: rows, error } = await q; if (error) throw error;
   for (const row of rows ?? []) {
+    // Per-row clock: tests inject a fixed `now` and expect it held constant across the whole
+    // sweep, but a real cron sweep over many rows must not timestamp a later row's lock with
+    // a `now` that was captured before the loop started — so default to a fresh clock read
+    // per row rather than one shared instant for the entire sweep.
+    const claimNow = o.now ?? new Date();
     const expMs = row.access_expires_at ? new Date(row.access_expires_at).getTime() : 0;
-    if (expMs - now.getTime() >= refreshWithinMs) continue;
+    if (expMs - claimNow.getTime() >= refreshWithinMs) continue;
     // Claim the per-owner lock atomically: a single conditional UPDATE. Tesla refresh tokens
     // are single-use, so two concurrent rotations for the same owner can invalidate the whole
     // token family — only the caller that wins this UPDATE may call Tesla for this row. The
     // UPDATE returns the row AS CLAIMED: all work below (staleness re-check, decryption, the
     // Tesla call) must use that claimed row, never the pre-claim select above, which may have
     // been read before a previous holder released the lock and rotated it.
-    const nowIso = now.toISOString();
-    const lockUntilIso = new Date(now.getTime() + LOCK_DURATION_MS).toISOString();
+    const nowIso = claimNow.toISOString();
+    const lockUntilIso = new Date(claimNow.getTime() + LOCK_DURATION_MS).toISOString();
     const { data: claimed, error: claimError } = await sb.from("tesla_credentials")
       .update({ refresh_lock_until: lockUntilIso })
       .eq("owner_id", row.owner_id)
@@ -49,7 +54,7 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
     // whoever held the lock before us, in which case it is no longer due and must not be
     // rotated again with a (now-consumed) refresh token.
     const claimedExpMs = claimedRow.access_expires_at ? new Date(claimedRow.access_expires_at).getTime() : 0;
-    if (claimedExpMs - now.getTime() >= refreshWithinMs) {
+    if (claimedExpMs - claimNow.getTime() >= refreshWithinMs) {
       skipped.push(row.owner_id);
       const { error: relErr } = await sb.from("tesla_credentials").update({ refresh_lock_until: null }).eq("owner_id", row.owner_id).eq("refresh_lock_until", lockUntilIso);
       if (relErr) console.error("tesla-refresh: failed to release lock", { owner_id: row.owner_id, error: relErr.message });
@@ -66,14 +71,21 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
       // token must be stored even if that takes a few attempts — losing it here locks
       // the owner out permanently.
       const updatePayload = { refresh_token_enc: "\\x" + Buffer.from(encryptToken(t.refresh_token, e.TOKEN_ENC_KEY)).toString("hex"),
-        access_token: t.access_token, access_expires_at: new Date(now.getTime() + t.expires_in * 1000).toISOString(), rotated_at: now.toISOString(), last_error: null };
+        access_token: t.access_token, access_expires_at: new Date(claimNow.getTime() + t.expires_in * 1000).toISOString(), rotated_at: claimNow.toISOString(), last_error: null };
       let stored = false, lastStoreError: unknown = null;
       const storeDelays = [0, ...STORE_RETRY_DELAYS_MS];
       for (const delay of storeDelays) {
         if (delay > 0) await sleep(delay);
-        const { error: ue } = await sb.from("tesla_credentials").update(updatePayload).eq("owner_id", row.owner_id);
-        if (!ue) { stored = true; break; }
-        lastStoreError = ue;
+        // Ownership-checked store: only write if we still hold the exact lock we claimed. If
+        // another caller's lock has since expired and been reclaimed (or ours was force-cleared),
+        // this update matches zero rows — Supabase reports that as success with no error, so the
+        // row count from .select() is the only way to detect it. Treat zero rows as a store
+        // failure for this attempt: it will retry (and ultimately report rotated_unstored) rather
+        // than silently discarding Tesla's already-issued new token pair.
+        const { data: ud, error: ue } = await sb.from("tesla_credentials").update(updatePayload)
+          .select("owner_id").eq("refresh_lock_until", lockUntilIso).eq("owner_id", row.owner_id);
+        if (!ue && ud?.length === 1) { stored = true; break; }
+        lastStoreError = ue ?? new Error("lock_lost: refresh_lock_until no longer matches our claim");
       }
       if (!stored) {
         console.error("tesla-refresh: rotated but unstored", { owner_id: row.owner_id });
