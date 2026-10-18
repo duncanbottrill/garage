@@ -40,6 +40,20 @@ describe("api routes", () => {
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     const { data } = await admin.from("api_usage").select("count").eq("owner_id", ownerId).eq("category", "commands").single(); expect(Number(data?.count)).toBeGreaterThanOrEqual(3);
   });
+  it("usage rejects a non-numeric count", async () => {
+    const { POST } = await import("@/app/api/usage/route");
+    const r = await POST(new Request("http://g/api/usage", { method: "POST", headers: H(), body: JSON.stringify({ category: "commands", count: "abc" }) }));
+    expect(r.status).toBe(400); expect((await r.json()).error).toBe("bad_count");
+  });
+  it("usage clamps an out-of-range count to 100", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    const { data: before } = await admin.from("api_usage").select("count").eq("owner_id", ownerId).eq("category", "wakes").maybeSingle();
+    const { POST } = await import("@/app/api/usage/route");
+    const r = await POST(new Request("http://g/api/usage", { method: "POST", headers: H(), body: JSON.stringify({ category: "wakes", count: 250 }) }));
+    expect(r.status).toBe(200);
+    const { data: after } = await admin.from("api_usage").select("count").eq("owner_id", ownerId).eq("category", "wakes").single();
+    expect(Number(after?.count) - Number(before?.count ?? 0)).toBe(100);
+  });
   it("vehicle-data fetches, maps, upserts and counts", async () => {
     const real = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => String(u).startsWith("https://fleet.test")
