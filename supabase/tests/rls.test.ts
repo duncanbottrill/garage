@@ -70,4 +70,10 @@ describe("row level security", () => {
     const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
     const { error } = await a.client.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 1 } }); expect(error).not.toBeNull();
   });
+  it("ensure_signals_partitions creates and secures missing months", async () => {
+    const { data: n } = await admin.rpc("ensure_signals_partitions", { p_months_ahead: 20 }); expect(Number(n)).toBeGreaterThanOrEqual(6);
+    const far = new Date(); far.setUTCMonth(far.getUTCMonth() + 19); const name = "signals_" + far.toISOString().slice(0, 7).replace("-", "");
+    const anon = createClient(process.env.SUPABASE_URL ?? "http://127.0.0.1:54321", process.env.SUPABASE_ANON_KEY!);
+    const { data, error } = await anon.from(name).select("*"); expect((data ?? []).length).toBe(0); // denied or empty, never rows
+  });
 });
