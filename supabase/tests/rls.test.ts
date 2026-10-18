@@ -23,6 +23,10 @@ describe("row level security", () => {
     const { data } = await a.client.from("tesla_credentials").select("*");
     expect(data).toEqual([]);
   });
+  it("get_tesla_connection shows only the caller's row and never tokens", async () => {
+    const { data: a1 } = await a.client.rpc("get_tesla_connection"); expect(a1?.[0]?.connected).toBe(true); expect(JSON.stringify(a1)).not.toMatch(/token/);
+    const { data: b1 } = await b.client.rpc("get_tesla_connection"); expect(b1?.[0]?.connected).toBe(false);
+  });
   it("increment_usage is service-only", async () => {
     const { error } = await a.client.rpc("increment_usage", { p_owner: a.id, p_category: "commands", p_count: 1 });
     expect(error).not.toBeNull();
@@ -54,5 +58,59 @@ describe("row level security", () => {
     const { data } = await admin.from("signals").select("name").eq("name", "rls_default_partition_test").eq("recorded_at", recordedAt);
     expect(data?.length).toBe(1);
     await admin.from("signals").delete().eq("name", "rls_default_partition_test").eq("recorded_at", recordedAt);
+  });
+  it("merge_vehicle_state merges jsonb and overwrites scalars", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    await admin.from("vehicle_state").upsert({ vehicle_id: v!.id, owner_id: a.id, soc: 50, tpms_bar: { fl: 2.9, fr: 2.9 } });
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 51, tpms_bar: { rl: 2.8 }, nonsense: 1, owner_id: b.id } });
+    expect(error).toBeNull();
+    const { data: s } = await admin.from("vehicle_state").select("soc, tpms_bar, owner_id").eq("vehicle_id", v!.id).single();
+    expect(Number(s?.soc)).toBe(51); expect(s?.tpms_bar).toEqual({ fl: 2.9, fr: 2.9, rl: 2.8 }); expect(s?.owner_id).toBe(a.id);
+  });
+  it("merge_vehicle_state treats a JSON null as omit, not set-to-null", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    await admin.from("vehicle_state").upsert({ vehicle_id: v!.id, owner_id: a.id, soc: 51 });
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: null } });
+    expect(error).toBeNull();
+    const { data: s } = await admin.from("vehicle_state").select("soc").eq("vehicle_id", v!.id).single();
+    expect(Number(s?.soc)).toBe(51);
+  });
+  it("merge_vehicle_state rejects a non-object patch", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: ["soc"] });
+    expect(error).not.toBeNull();
+  });
+  it("merge_vehicle_state is service-only", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    const { error } = await a.client.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 1 } }); expect(error).not.toBeNull();
+  });
+  it("vehicles.owner_id is immutable", async () => {
+    const { error } = await admin.from("vehicles").update({ owner_id: b.id }).eq("vin", "VINAAAA");
+    expect(error?.message).toMatch(/immutable/);
+  });
+  it("ensure_signals_partitions secures a far-future partition: anon is denied, other users see nothing, the owner reads it via the parent", async () => {
+    const { error: rpcError } = await admin.rpc("ensure_signals_partitions", { p_months_ahead: 20 });
+    expect(rpcError).toBeNull();
+
+    const now = new Date();
+    const far = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 19, 1));
+    const partitionName = "signals_" + far.toISOString().slice(0, 7).replace("-", "");
+    const recordedAt = new Date(Date.UTC(far.getUTCFullYear(), far.getUTCMonth(), 2)).toISOString();
+
+    await admin.from("signals").insert({ vehicle_id: vehicleId, owner_id: a.id, name: "Soc", value_num: 1, recorded_at: recordedAt });
+    try {
+      const anon = createClient(process.env.SUPABASE_URL ?? "http://127.0.0.1:54321", process.env.SUPABASE_ANON_KEY!, { auth: { persistSession: false } });
+      const { data: anonData, error: anonError } = await anon.from(partitionName).select("*");
+      expect(anonError).not.toBeNull();
+      expect(anonData ?? []).toHaveLength(0);
+
+      const { data: bData } = await b.client.from("signals").select("*").eq("vehicle_id", vehicleId).eq("recorded_at", recordedAt);
+      expect(bData).toEqual([]);
+
+      const { data: aData } = await a.client.from("signals").select("*").eq("vehicle_id", vehicleId).eq("recorded_at", recordedAt);
+      expect(aData?.length).toBe(1);
+    } finally {
+      await admin.from("signals").delete().eq("vehicle_id", vehicleId).eq("name", "Soc").eq("recorded_at", recordedAt);
+    }
   });
 });

@@ -9,6 +9,14 @@ describe("vehicleDataToState", () => {
     expect(s.inside_c).toBe(19.2); expect(s.lat).toBe(51.5013); expect(s.gear).toBe("P"); expect(s.speed_kph).toBe(0);
     expect(s.odometer_km).toBeCloseTo(8412.6, 1); expect(s.locked).toBe(true); expect(s.software_version).toBe("2026.32.5");
     expect(s.sleep_state).toBe("online"); expect(s.charge_at).toBe(at.toISOString());
+    expect(s.doors).toEqual({ driver_front: false, passenger_front: false, driver_rear: false, passenger_rear: false });
+    expect(s.windows).toEqual({ driver_front: false, passenger_front: false, driver_rear: false, passenger_rear: false });
   });
   it("omits missing groups", () => { expect(vehicleDataToState({ state: "asleep" }, at)).toEqual({ updated_at: at.toISOString(), sleep_state: "asleep" }); });
+  it("maps driver door and passenger rear window open", () => {
+    const fx2 = { ...(fx as any), vehicle_state: { ...(fx as any).vehicle_state, df: 1, rp_window: 1 } };
+    const s = vehicleDataToState(fx2, at);
+    expect(s.doors?.driver_front).toBe(true);
+    expect(s.windows?.passenger_rear).toBe(true);
+  });
 });
