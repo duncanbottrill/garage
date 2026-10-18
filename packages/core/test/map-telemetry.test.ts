@@ -9,4 +9,7 @@ describe("telemetrySignalToState", () => {
   it("DetailedChargeState", () => expect(m("DetailedChargeState", "DetailedChargeStateCharging", at)).toEqual({ charge_state: "charging" }));
   it("unknown → {}", () => expect(m("Nonsense", 1, at)).toEqual({}));
   it("bad numbers → {}", () => expect(m("Soc", "n/a", at)).toEqual({}));
+  it("SentryMode armed → true", () => expect(m("SentryMode", "SentryModeStateArmed", at)).toEqual({ sentry: true }));
+  it("SentryMode off → false", () => expect(m("SentryMode", "SentryModeStateOff", at)).toEqual({ sentry: false }));
+  it("Location with only latitude → {}", () => expect(m("Location", { latitude: 1 }, at)).toEqual({}));
 });
