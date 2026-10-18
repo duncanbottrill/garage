@@ -12,7 +12,7 @@ export async function POST(req: Request) {
   const { error: ledgerError } = await sb.rpc("increment_usage", { p_owner: u.id, p_category: "data", p_count: 1 });
   if (ledgerError) return Response.json({ error: "ledger_unavailable" }, { status: 503 }); // never make an unlogged billable call
   try {
-    const payload = await fleet.get<any>(`/api/1/vehicles/${v.tesla_vehicle_id}/vehicle_data?endpoints=${encodeURIComponent("charge_state;climate_state;drive_state;vehicle_state")}`);
+    const payload = await fleet.get<any>(`/api/1/vehicles/${v.tesla_vehicle_id}/vehicle_data?endpoints=${encodeURIComponent("charge_state;climate_state;drive_state;location_data;vehicle_state")}`);
     const state = vehicleDataToState(payload, new Date());
     await sb.from("vehicle_state").upsert({ vehicle_id: v.id, owner_id: u.id, ...state });
     return Response.json({ state });
