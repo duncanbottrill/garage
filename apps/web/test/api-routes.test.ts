@@ -96,9 +96,12 @@ describe("api routes", () => {
   it("vehicle-data refuses when budget_mode is minimal", async () => {
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     await admin.from("vehicles").update({ budget_mode: "minimal" }).eq("id", vehicleId);
-    const { POST } = await import("@/app/api/vehicle-data/route");
-    const r = await POST(new Request("http://g/api/vehicle-data", { method: "POST", headers: H(), body: JSON.stringify({ vehicle_id: vehicleId }) }));
-    expect(r.status).toBe(429); expect((await r.json()).error).toBe("budget_minimal");
-    await admin.from("vehicles").update({ budget_mode: "normal" }).eq("id", vehicleId);
+    try {
+      const { POST } = await import("@/app/api/vehicle-data/route");
+      const r = await POST(new Request("http://g/api/vehicle-data", { method: "POST", headers: H(), body: JSON.stringify({ vehicle_id: vehicleId }) }));
+      expect(r.status).toBe(429); expect((await r.json()).error).toBe("budget_minimal");
+    } finally {
+      await admin.from("vehicles").update({ budget_mode: "normal" }).eq("id", vehicleId);
+    }
   });
 });
