@@ -60,7 +60,7 @@ Five parts, one job each.
 |---|---|---|---|
 | Tailscale add-on | HA Green | Joins the tailnet; Funnel exposes port 443 → telemetry receiver only; gives phone/Mac a private route to the proxy | Tailscale account (free) |
 | Tesla HTTP Proxy add-on (llamafilm) | HA Green | Holds the private key, signs commands, exposes REST on the tailnet address | Tesla access token (read from Supabase via Vercel-issued short-lived token, see 4.1) |
-| Garage Bridge add-on (ours) | HA Green | fleet-telemetry server (unmodified) + ingest worker | Supabase service key, telemetry hostname, budget cap (all via HA add-on options) |
+| Garage Bridge add-on (ours) | HA Green | fleet-telemetry server (unmodified) + ingest worker; fetches the Tesla access token from `GET /api/bridge/token` with its per-owner bridge secret | Supabase service key, telemetry hostname, budget cap (all via HA add-on options) |
 | Supabase | cloud | System of record; Realtime fan-out; RLS | — |
 | Vercel app (`apps/web`) | Vercel | Public key, OAuth callback, token refresh cron, authenticated API routes; later the home dashboard | Supabase, Upstash |
 | Apple app (`apps/apple`) | iPhone, Mac | Status UI, controls, onboarding | Supabase session, Tailscale on device |
@@ -71,7 +71,7 @@ Five parts, one job each.
 
 - One-time OAuth authorization-code flow with PKCE, started from the app, completed in the browser, landing on the Vercel callback. Scopes: `openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds vehicle_location`.
 - The refresh token is stored in Supabase table `tesla_credentials`, encrypted with pgsodium (column-level), readable only by the service role.
-- Tesla refresh tokens are single-use. Exactly one process rotates them: a Vercel cron (`/api/cron/tesla-refresh`, every 4 hours; access tokens last 8) that refreshes, stores the new pair, and writes the current access token to `tesla_credentials.access_token` with its expiry.
+- Tesla refresh tokens are single-use. Rotation happens in one place, `refreshAll`, behind a per-owner claim lock; the daily cron and the on-demand path in `/api/token` and `/api/bridge/token` both go through it, so there is at most one rotation per owner at a time.
 - The proxy add-on and the ingest worker fetch the current access token from Supabase (service role) on start and whenever a request returns 401. They never refresh.
 - Partner registration (`POST /api/1/partner_accounts` with the garage domain) is a one-time script in `apps/web/scripts/`, run from the Mac with the client credentials.
 
@@ -215,7 +215,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 - SwiftUI, one Xcode project, targets iOS 26 and macOS 26. Swift Package `GarageKit` holds the vehicle store, command client, models and design tokens; the app target is thin.
 - **VehicleStore**: Supabase Swift SDK, Realtime subscription to `vehicle_state`; per-field freshness; last snapshot persisted in app support for instant cold launch.
 - **CommandClient**: base URL from settings (tailnet name), bearer from `/api/token`, optimistic state with `pending` markers, idempotency key per tap, 10 s timeout, typed errors mapped to copy. Detects Tailscale reachability by probing the proxy health endpoint; when unreachable, controls disable with a "Connect Tailscale" action (opens the Tailscale app).
-- **Screens**: Status (04), Climate sheet, Charge sheet, More, Onboarding. Onboarding has four steps: (1) Sign in with Apple, which creates the Supabase account that owns everything; (2) Connect Tesla via `ASWebAuthenticationSession` to `/auth/start`, returning on `garage://connected`; (3) confirm the vehicle (one in slice 1, picker later); (4) check Tailscale reachability of the proxy, with instructions and the pairing deep link if the key is not yet paired. Drives, Charges, Battery tabs ship with designed empty states.
+- **Screens**: Status (04), Climate sheet, Charge sheet, More, Onboarding. Onboarding has four steps: (1) Sign in with Apple, which creates the Supabase account that owns everything; (2) Connect Tesla: `POST /auth/start` with the Supabase JWT returns the Tesla URL, which the app opens in `ASWebAuthenticationSession`, returning on `garage://connected`; (3) confirm the vehicle (one in slice 1, picker later); (4) check Tailscale reachability of the proxy, with instructions and the pairing deep link if the key is not yet paired. Drives, Charges, Battery tabs ship with designed empty states.
 - **Navigation**: iPhone `TabView` with the iOS 26 floating glass tab bar; Mac `NavigationSplitView` sidebar with the same five sections and a two-column Status (map left, sheet content right).
 - **Map**: MapKit with a dark standard style, car annotation with a breathing halo while `bridge_seen_at` is fresh, recent trail from the last 30 minutes of `Location` signals.
 - **Design system**: `GarageKit/Design` generated from `packages/tokens/tokens.json` (colours, type scale, radii, spacing). Big Shoulders Display and Instrument Sans bundled (OFL).
@@ -240,6 +240,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 | Token refresh failing | cron error → `tesla_credentials.rotated_at` stale | red row in More; push notification (slice 4); app keeps last-known data, never signs out |
 | Budget threshold | `budget_mode` | banner explaining reduced cadence |
 | Supabase unreachable from bridge | buffer then drop | `dropped_count` in More's connection health |
+| Token health | `GET /api/connection` or `get_tesla_connection()` | red row in More with `last_error` |
 
 ## 11. Security
 
