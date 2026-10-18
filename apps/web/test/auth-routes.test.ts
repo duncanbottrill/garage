@@ -34,7 +34,7 @@ describe("auth routes", () => {
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     await admin.from("oauth_states").insert({ state: "replay-state", owner_id: ownerId, verifier: "v" });
     const real = globalThis.fetch;
-    vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => String(u).includes("auth.tesla.com")
+    vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => String(u).includes("fleet-auth.prd.vn.cloud.tesla.com")
       ? new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })
       : real(u, init)));
     const { GET } = await import("@/app/auth/callback/route");

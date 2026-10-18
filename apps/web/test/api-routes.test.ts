@@ -27,7 +27,7 @@ describe("api routes", () => {
     const jwt2 = s.data.session!.access_token; const owner2 = s.data.user!.id;
     await admin.from("tesla_credentials").upsert({ owner_id: owner2, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-API", process.env.TOKEN_ENC_KEY!)).toString("hex"), access_token: "OLD-API", access_expires_at: new Date(Date.now() + 10 * 60_000).toISOString() });
     const real = globalThis.fetch;
-    vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => String(u).includes("auth.tesla.com")
+    vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => String(u).includes("fleet-auth.prd.vn.cloud.tesla.com")
       ? new Response(JSON.stringify({ access_token: "NEW-API", refresh_token: "RT-API2", expires_in: 28800 }), { status: 200 })
       : real(u, init)));
     const { GET } = await import("@/app/api/token/route");
