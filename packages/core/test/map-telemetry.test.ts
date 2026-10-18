@@ -15,5 +15,6 @@ describe("telemetrySignalToState", () => {
   it("DoorState object", () => expect(m("DoorState", { DriverFront: true, PassengerFront: false, DriverRear: false, PassengerRear: false, TrunkFront: true, TrunkRear: false }, at)).toEqual({ doors: { driver_front: true, passenger_front: false, driver_rear: false, passenger_rear: false }, frunk_open: true, trunk_open: false, body_at: iso }));
   it("DoorState string list", () => expect(m("DoorState", "PassengerRear|TrunkRear", at).doors?.passenger_rear).toBe(true));
   it("window signal", () => expect(m("FpWindow", "WindowStatePartiallyOpen", at)).toEqual({ windows: { passenger_front: true } }));
+  it("window signal null → {}", () => expect(m("FdWindow", null, at)).toEqual({}));
   it("ChargeAmps", () => expect(m("ChargeAmps", "16", at)).toEqual({ charge_amps: 16 }));
 });

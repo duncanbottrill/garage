@@ -224,6 +224,7 @@ describe("refreshAll", () => {
     // (token-fenced) update run. Its WHERE clause then matches zero rows, which is exactly the
     // token_changed case — no retry, no backoff, no last_error — and the re-authed value must survive.
     let intercepted = false;
+    const storeAttempts = { n: 0 };
     const client = new Proxy(admin, { get(t, p, r) {
       if (p !== "from") return Reflect.get(t, p, r);
       return (table: string) => {
@@ -232,6 +233,7 @@ describe("refreshAll", () => {
         const origUpdate = q.update.bind(q);
         q.update = (values: any) => {
           const u: any = origUpdate(values);
+          if ("access_token" in values) storeAttempts.n++;
           if (!intercepted && "access_token" in values) {
             intercepted = true;
             const origThen = u.then.bind(u);
@@ -252,6 +254,7 @@ describe("refreshAll", () => {
     expect(r.failed).toContainEqual({ owner_id: owner, error: "token_changed" });
     expect(r.rotated).not.toContain(owner);
     expect(f).toHaveBeenCalledTimes(1);
+    expect(storeAttempts.n).toBe(1); // token_changed stops immediately — no retry of the store update()
     const { data } = await admin.from("tesla_credentials").select("last_error, refresh_failures, next_refresh_at, refresh_lock_until, refresh_token_enc").eq("owner_id", owner).single();
     expect(data?.last_error).toBeNull();
     expect(data?.refresh_failures).toBe(0);
@@ -281,11 +284,12 @@ describe("refreshAll", () => {
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     const owner = await makeOwner(admin, "storecreds-reset@test.local"); backoffOwners.push(owner);
     const future = new Date(Date.now() + 3600_000).toISOString();
-    await admin.from("tesla_credentials").upsert({ owner_id: owner, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-SC1", KEY)).toString("hex"), access_token: "sc1", access_expires_at: future, refresh_failures: 5, next_refresh_at: future });
+    await admin.from("tesla_credentials").upsert({ owner_id: owner, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-SC1", KEY)).toString("hex"), access_token: "sc1", access_expires_at: future, refresh_failures: 5, next_refresh_at: future, refresh_lock_until: future });
     const { storeCredentials } = await import("@/lib/tesla-auth");
     await storeCredentials(owner, { access_token: "A", refresh_token: "R", expires_in: 28800 });
-    const { data } = await admin.from("tesla_credentials").select("refresh_failures, next_refresh_at").eq("owner_id", owner).single();
+    const { data } = await admin.from("tesla_credentials").select("refresh_failures, next_refresh_at, refresh_lock_until").eq("owner_id", owner).single();
     expect(data?.refresh_failures).toBe(0);
     expect(data?.next_refresh_at).toBeNull();
+    expect(data?.refresh_lock_until).toBeNull();
   });
 });

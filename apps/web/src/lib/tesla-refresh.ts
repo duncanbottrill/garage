@@ -39,7 +39,9 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
     // Tesla call) must use that claimed row, never the pre-claim select above, which may have
     // been read before a previous holder released the lock and rotated it.
     const nowIso = claimNow.toISOString();
-    const lockUntilIso = new Date(claimNow.getTime() + LOCK_DURATION_MS).toISOString();
+    // Millisecond jitter: two claimers racing in the same millisecond must never compute the
+    // same lockUntilIso, or an owned-release by one could clear a lock the other still holds.
+    const lockUntilIso = new Date(claimNow.getTime() + LOCK_DURATION_MS + Math.floor(Math.random() * 1000)).toISOString();
     const { data: claimed, error: claimError } = await sb.from("tesla_credentials")
       .update({ refresh_lock_until: lockUntilIso })
       .eq("owner_id", row.owner_id)
@@ -136,7 +138,7 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
           last_error: String(err?.message ?? err).slice(0, 500),
           refresh_failures: n,
           next_refresh_at: new Date(claimNow.getTime() + backoffMs).toISOString(),
-        }).eq("owner_id", row.owner_id).eq("refresh_token_enc", claimedRow.refresh_token_enc as string);
+        }).eq("refresh_token_enc", claimedRow.refresh_token_enc as string).eq("owner_id", row.owner_id);
         if (le) throw le;
       } catch (lastErrorErr: any) {
         console.error("tesla-refresh: failed to record last_error", { owner_id: row.owner_id, error: String(lastErrorErr?.message ?? lastErrorErr) });

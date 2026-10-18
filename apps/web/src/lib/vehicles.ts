@@ -12,7 +12,12 @@ export async function syncVehicles(ownerId: string, o: { fetch?: typeof fetch; c
   const out: Array<{ id: string; vin: string; display_name: string }> = [];
   const conflicts: string[] = [];
   for (const v of list ?? []) {
-    const { data: existing } = await sb.from("vehicles").select("id, owner_id").eq("vin", v.vin).maybeSingle();
+    const { data: existing, error: exErr } = await sb.from("vehicles").select("id, owner_id").eq("vin", v.vin).maybeSingle();
+    if (exErr) {
+      conflicts.push(v.vin);
+      console.error("vehicles: ownership check failed, skipped", { vin: v.vin, error: exErr.message });
+      continue;
+    }
     if (existing && existing.owner_id !== ownerId) {
       conflicts.push(v.vin);
       console.warn("vehicles: VIN owned by another account, skipped", { vin: v.vin });

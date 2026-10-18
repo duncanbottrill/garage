@@ -31,6 +31,7 @@ export function telemetrySignalToState(name: string, value: unknown, at: Date): 
       return { doors: { driver_front: open("DriverFront"), passenger_front: open("PassengerFront"), driver_rear: open("DriverRear"), passenger_rear: open("PassengerRear") }, frunk_open: open("TrunkFront"), trunk_open: open("TrunkRear"), body_at: iso };
     }
     case "FdWindow": case "FpWindow": case "RdWindow": case "RpWindow": {
+      if (value == null) return {};
       const key = ({ Fd: "driver_front", Fp: "passenger_front", Rd: "driver_rear", Rp: "passenger_rear" } as const)[name.slice(0, 2) as "Fd" | "Fp" | "Rd" | "Rp"];
       return { windows: { [key]: value !== "WindowStateClosed" && value !== false } as any };
     }

@@ -10,6 +10,10 @@ export async function POST(req: Request) {
   if (v.budget_mode === "minimal") return Response.json({ error: "budget_minimal" }, { status: 429 });
   const t = await currentAccessToken(u.id); if (!t) return Response.json({ error: "not_connected" }, { status: 404 });
   const fleet = new FleetClient({ baseUrl: env().TESLA_FLEET_BASE, token: t.token });
+  // ensure the vehicle_state row exists before any billable call, so merge_vehicle_state
+  // below always has a row to merge into even on a vehicle's very first fetch.
+  const { error: stateInitError } = await sb.from("vehicle_state").upsert({ vehicle_id: v.id, owner_id: u.id }, { onConflict: "vehicle_id", ignoreDuplicates: true });
+  if (stateInitError) return Response.json({ error: "state_init_failed" }, { status: 500 });
   const { error: ledgerError } = await sb.rpc("increment_usage", { p_owner: u.id, p_category: "data", p_count: 1 });
   if (ledgerError) return Response.json({ error: "ledger_unavailable" }, { status: 503 }); // never make an unlogged billable call
   try {
