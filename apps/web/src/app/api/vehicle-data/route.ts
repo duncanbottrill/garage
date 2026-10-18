@@ -14,7 +14,8 @@ export async function POST(req: Request) {
   try {
     const payload = await fleet.get<any>(`/api/1/vehicles/${v.tesla_vehicle_id}/vehicle_data?endpoints=${encodeURIComponent("charge_state;climate_state;drive_state;location_data;vehicle_state")}`);
     const state = vehicleDataToState(payload, new Date());
-    await sb.from("vehicle_state").upsert({ vehicle_id: v.id, owner_id: u.id, ...state });
+    const { error: stateError } = await sb.from("vehicle_state").upsert({ vehicle_id: v.id, owner_id: u.id, ...state });
+    if (stateError) return Response.json({ error: "state_write_failed" }, { status: 500 });
     return Response.json({ state });
   } catch (e) {
     if (e instanceof FleetError && e.status === 408) return Response.json({ error: "asleep" }, { status: 409 });
