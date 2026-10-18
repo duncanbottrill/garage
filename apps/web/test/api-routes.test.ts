@@ -62,6 +62,8 @@ describe("api routes", () => {
     const { POST } = await import("@/app/api/vehicle-data/route");
     const r = await POST(new Request("http://g/api/vehicle-data", { method: "POST", headers: H(), body: JSON.stringify({ vehicle_id: vehicleId }) }));
     expect(r.status).toBe(200); expect((await r.json()).state.soc).toBe(55);
+    const vehicleDataCall = (globalThis.fetch as any).mock.calls.find((c: any) => String(c[0]).includes("vehicle_data"));
+    expect(String(vehicleDataCall?.[0])).toContain("/api/1/vehicles/VINAPI/vehicle_data");
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     const { data } = await admin.from("vehicle_state").select("soc").eq("vehicle_id", vehicleId).single(); expect(Number(data?.soc)).toBe(55);
   });
