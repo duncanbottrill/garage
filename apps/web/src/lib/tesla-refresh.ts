@@ -1,6 +1,6 @@
 import { decryptToken, encryptToken } from "@garage/core";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { env } from "./env"; import { serviceClient } from "./supabase"; import { AUTH_BASE } from "./tesla-auth";
+import { env } from "./env"; import { serviceClient } from "./supabase"; import { TOKEN_URL } from "./tesla-auth";
 const STORE_RETRY_DELAYS_MS = [200, 500];
 const LOCK_DURATION_MS = 90_000;
 const DEFAULT_REFRESH_WITHIN_MS = 3 * 3600_000; // cron sweep: refresh when less than 3h of access remains
@@ -62,7 +62,7 @@ export async function refreshAll(o: { fetch?: typeof fetch; now?: Date; client?:
     }
     try {
       const rt = decryptToken(hexToBytes(claimedRow.refresh_token_enc), e.TOKEN_ENC_KEY);
-      const r = await f(AUTH_BASE + "/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      const r = await f(TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ grant_type: "refresh_token", client_id: e.TESLA_CLIENT_ID, refresh_token: rt }),
         signal: AbortSignal.timeout(TESLA_FETCH_TIMEOUT_MS) });
       if (!r.ok) throw new Error(`refresh ${r.status}: ${(await r.text()).slice(0, 200)}`);

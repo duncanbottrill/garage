@@ -1,5 +1,5 @@
 import { env } from "../src/lib/env";
-const e = env(); const AUTH = "https://auth.tesla.com/oauth2/v3/token";
+const e = env(); const AUTH = "https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token";
 const tok = await fetch(AUTH, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({ grant_type: "client_credentials", client_id: e.TESLA_CLIENT_ID, client_secret: e.TESLA_CLIENT_SECRET, scope: "openid vehicle_device_data vehicle_cmds vehicle_charging_cmds", audience: e.TESLA_FLEET_BASE }) });
 if (!tok.ok) throw new Error("partner token failed: " + (await tok.text()));

@@ -1,4 +1,5 @@
 import { requireCron } from "@/lib/supabase";
+import { TOKEN_URL } from "@/lib/tesla-auth";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
@@ -10,7 +11,7 @@ export async function POST(req: Request) {
   const fleetBase = process.env.TESLA_FLEET_BASE, redirect = process.env.TESLA_REDIRECT_URI;
   if (!clientId || !clientSecret || !fleetBase || !redirect) return Response.json({ error: "missing_env" }, { status: 500 });
   const domain = new URL(redirect).host;
-  const tok = await fetch("https://auth.tesla.com/oauth2/v3/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+  const tok = await fetch(TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "client_credentials", client_id: clientId, client_secret: clientSecret, scope: "openid vehicle_device_data vehicle_cmds vehicle_charging_cmds", audience: fleetBase }) });
   if (!tok.ok) return Response.json({ step: "partner_token", status: tok.status, body: (await tok.text()).slice(0, 500) }, { status: 502 });
   const { access_token } = await tok.json();

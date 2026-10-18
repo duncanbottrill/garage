@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Tesla region EU: Fleet API base `https://fleet-api.prd.eu.vehicle-command.com`; auth base `https://auth.tesla.com/oauth2/v3`; audience = Fleet API base.
+- Tesla region EU: Fleet API base `https://fleet-api.prd.eu.vn.cloud.tesla.com` (the `vehicle-command.com` hosts are retired); authorize at `https://auth.tesla.com/oauth2/v3/authorize`; every server-side `/token` call (code exchange, refresh, partner token) at `https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token`; audience = Fleet API base.
 - Tesla client ID `3f7843f7-ba1d-4091-9e6b-a41acfe7ef5c`; client secret only in Vercel env `TESLA_CLIENT_SECRET` and local `.env.local`, never committed.
 - Registered domain `garage.duncanbottrill.com`; redirect URI `https://garage.duncanbottrill.com/auth/callback`; public key at `/.well-known/appspecific/com.tesla.3p.public-key.pem`.
 - Scopes: `openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds vehicle_location`.
