@@ -1,0 +1,2 @@
+{ "crons": [ { "path": "/api/cron/tesla-refresh", "schedule": "0 */4 * * *" }, { "path": "/api/cron/budget", "schedule": "15 6 * * *" } ],
+  "headers": [ { "source": "/.well-known/appspecific/(.*)", "headers": [ { "key": "Content-Type", "value": "application/x-pem-file" }, { "key": "Cache-Control", "value": "public, max-age=3600" } ] } ] }
