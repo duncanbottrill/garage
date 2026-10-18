@@ -10,6 +10,7 @@ beforeAll(async () => {
   jwt = s.data.session!.access_token; ownerId = s.data.user!.id;
   await admin.from("tesla_credentials").upsert({ owner_id: ownerId, refresh_token_enc: "\\x00", access_token: "TOK", access_expires_at: new Date(Date.now() + 4 * 3600_000).toISOString() });
   const { data: v } = await admin.from("vehicles").upsert({ owner_id: ownerId, vin: "VINAPI", tesla_vehicle_id: 42 }, { onConflict: "vin" }).select("id").single(); vehicleId = v!.id;
+  await admin.from("vehicle_state").upsert({ vehicle_id: vehicleId, owner_id: ownerId }, { onConflict: "vehicle_id", ignoreDuplicates: true });
 });
 afterEach(() => vi.unstubAllGlobals());
 const H = () => ({ authorization: `Bearer ${jwt}`, "content-type": "application/json" });

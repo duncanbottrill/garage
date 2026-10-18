@@ -59,4 +59,15 @@ describe("row level security", () => {
     expect(data?.length).toBe(1);
     await admin.from("signals").delete().eq("name", "rls_default_partition_test").eq("recorded_at", recordedAt);
   });
+  it("merge_vehicle_state merges jsonb and overwrites scalars", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    await admin.from("vehicle_state").upsert({ vehicle_id: v!.id, owner_id: a.id, soc: 50, tpms_bar: { fl: 2.9, fr: 2.9 } });
+    await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 51, tpms_bar: { rl: 2.8 }, nonsense: 1, owner_id: b.id } });
+    const { data: s } = await admin.from("vehicle_state").select("soc, tpms_bar, owner_id").eq("vehicle_id", v!.id).single();
+    expect(Number(s?.soc)).toBe(51); expect(s?.tpms_bar).toEqual({ fl: 2.9, fr: 2.9, rl: 2.8 }); expect(s?.owner_id).toBe(a.id);
+  });
+  it("merge_vehicle_state is service-only", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    const { error } = await a.client.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 1 } }); expect(error).not.toBeNull();
+  });
 });
