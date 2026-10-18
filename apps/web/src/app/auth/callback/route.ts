@@ -5,8 +5,7 @@ export async function GET(req: Request) {
   const u = new URL(req.url); const code = u.searchParams.get("code"), state = u.searchParams.get("state"), teslaError = u.searchParams.get("error");
   if (!state) return back("error=missing_params");
   const sb = serviceClient();
-  const { data: row } = await sb.from("oauth_states").select("owner_id, verifier, created_at").eq("state", state).maybeSingle();
-  const { error: delError } = await sb.from("oauth_states").delete().eq("state", state);
+  const { data: row, error: delError } = await sb.from("oauth_states").delete().eq("state", state).select("owner_id, verifier, created_at").maybeSingle();
   if (delError) console.error("oauth_states delete failed", delError.message);
   if (!code) return back("error=" + encodeURIComponent((teslaError ?? "missing_params").slice(0, 40)));
   if (!row || Date.now() - new Date(row.created_at).getTime() > 10 * 60_000) return back("error=bad_state");
