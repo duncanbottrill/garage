@@ -42,4 +42,16 @@ describe("vehicle sync", () => {
     const r = await POST(new Request("http://g/api/vehicles/sync", { method: "POST", headers: { authorization: `Bearer ${jwt}` } }));
     expect(r.status).toBe(200); expect((await r.json()).vehicles[0].vin).toBe("XP7YSYNC000000001");
   });
+  it("never reassigns a VIN that belongs to another owner", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    const u2 = await admin.auth.admin.createUser({ email: "sync-other@test.local", password: "pass-1234", email_confirm: true });
+    const other = u2.data.user?.id ?? (await admin.auth.admin.listUsers()).data.users.find(x => x.email === "sync-other@test.local")!.id;
+    await admin.from("vehicles").upsert({ owner_id: other, vin: "XP7YOTHER00000001", display_name: "Theirs" }, { onConflict: "vin" });
+    fleetStub({ response: [{ id: 999, vehicle_id: 998, vin: "XP7YOTHER00000001", display_name: "Mine?", state: "online" }] });
+    const { syncVehicles } = await import("@/lib/vehicles");
+    const r = await syncVehicles(ownerId);
+    expect(r.vehicles).toEqual([]); expect(r.conflicts).toEqual(["XP7YOTHER00000001"]);
+    const { data: v } = await admin.from("vehicles").select("owner_id, display_name").eq("vin", "XP7YOTHER00000001").single();
+    expect(v?.owner_id).toBe(other); expect(v?.display_name).toBe("Theirs");
+  });
 });
