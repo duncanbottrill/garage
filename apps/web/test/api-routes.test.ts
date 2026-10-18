@@ -77,4 +77,9 @@ describe("api routes", () => {
     const r = await POST(new Request("http://g/api/vehicle-data", { method: "POST", headers: H(), body: JSON.stringify({ vehicle_id: vehicleId }) }));
     expect(r.status).toBe(409); expect(f.mock.calls.some((c: any) => String(c[0]).includes("wake_up"))).toBe(false);
   });
+  it("connection route returns health for the caller", async () => {
+    const { GET } = await import("@/app/api/connection/route");
+    expect((await GET(new Request("http://g/api/connection"))).status).toBe(401);
+    const r = await GET(new Request("http://g/api/connection", { headers: H() })); const j = await r.json(); expect(j.connected).toBe(true); expect(j.access_token).toBeUndefined();
+  });
 });

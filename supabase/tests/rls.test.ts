@@ -23,6 +23,10 @@ describe("row level security", () => {
     const { data } = await a.client.from("tesla_credentials").select("*");
     expect(data).toEqual([]);
   });
+  it("get_tesla_connection shows only the caller's row and never tokens", async () => {
+    const { data: a1 } = await a.client.rpc("get_tesla_connection"); expect(a1?.[0]?.connected).toBe(true); expect(JSON.stringify(a1)).not.toMatch(/token/);
+    const { data: b1 } = await b.client.rpc("get_tesla_connection"); expect(b1?.[0]?.connected).toBe(false);
+  });
   it("increment_usage is service-only", async () => {
     const { error } = await a.client.rpc("increment_usage", { p_owner: a.id, p_category: "commands", p_count: 1 });
     expect(error).not.toBeNull();
