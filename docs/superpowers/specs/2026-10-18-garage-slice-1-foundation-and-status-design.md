@@ -30,7 +30,7 @@ Slice 1 replaces Tessie for daily use: live state of the car, controls, and the 
 | Item | Value |
 |---|---|
 | Car | 2025 Model Y Dual Motor Performance, one vehicle, UK |
-| Fleet API region | EU (`fleet-api.prd.eu.vehicle-command.com`) |
+| Fleet API region | EU (`https://fleet-api.prd.eu.vn.cloud.tesla.com`; token endpoint `https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token`, authorize at `auth.tesla.com`) |
 | Tesla developer app | created 2026-10-18, client ID `3f7843f7-ba1d-4091-9e6b-a41acfe7ef5c`; secret held by Duncan, never in the repo |
 | Registered domain | `garage.duncanbottrill.com` (Vercel project `car-backend`, team `duncan-bottrills-projects`) |
 | Redirect URI | `https://garage.duncanbottrill.com/auth/callback` |

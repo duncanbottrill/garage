@@ -1,0 +1,12 @@
+node_modules
+dist
+.next
+.vercel
+.env
+.env.local
+*.pem.key
+supabase/.branches
+supabase/.temp
+.DS_Store
+.superpowers/
+*.tsbuildinfo

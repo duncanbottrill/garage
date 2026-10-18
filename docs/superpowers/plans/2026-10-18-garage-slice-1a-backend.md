@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Tesla region EU: Fleet API base `https://fleet-api.prd.eu.vehicle-command.com`; auth base `https://auth.tesla.com/oauth2/v3`; audience = Fleet API base.
+- Tesla region EU: Fleet API base `https://fleet-api.prd.eu.vn.cloud.tesla.com` (the `vehicle-command.com` hosts are retired); authorize at `https://auth.tesla.com/oauth2/v3/authorize`; every server-side `/token` call (code exchange, refresh, partner token) at `https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token`; audience = Fleet API base.
 - Tesla client ID `3f7843f7-ba1d-4091-9e6b-a41acfe7ef5c`; client secret only in Vercel env `TESLA_CLIENT_SECRET` and local `.env.local`, never committed.
 - Registered domain `garage.duncanbottrill.com`; redirect URI `https://garage.duncanbottrill.com/auth/callback`; public key at `/.well-known/appspecific/com.tesla.3p.public-key.pem`.
 - Scopes: `openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds vehicle_location`.
@@ -1598,3 +1598,47 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>" && git push
 - **Not in this plan by design.** `signals` writes, `vehicle_state` streaming updates and `bridge_seen_at` heartbeat (Plan 1B); all UI (Plan 1C); partition-extension cron (needed before month 14; add to Plan 2 as a Vercel cron using the same `do $$` block).
 - **Type consistency.** `VehicleStateRow` columns match migration 0001; `UsageCategory` matches the `api_usage` check constraint; `BudgetMode` matches `vehicles.budget_mode`; `increment_usage(p_owner, p_category, p_count)` and `set_budget_mode(p_vehicle, p_mode)` are called with those exact parameter names in Tasks 9 and 10.
 - **Placeholders.** None; every step has its code and command.
+### Task 13: On-demand token refresh with a claim lock (Vercel Hobby crons are daily)
+
+**Why:** Vercel Hobby only allows daily cron schedules, so `/api/cron/tesla-refresh` now runs once a day (06:15 UTC) and cannot keep an 8-hour Tesla access token fresh on its own. The app and the add-on fetch the access token through `GET /api/token`, so that route must refresh on demand when the token is near expiry, while keeping the global rule: **exactly one rotation at a time per owner** (Tesla refresh tokens are single-use; a concurrent double refresh can invalidate the whole token family).
+
+**Files:**
+- Create: `supabase/migrations/0004_refresh_lock.sql`
+- Modify: `apps/web/src/lib/tesla-refresh.ts` (add `ownerId` filter + lock claim), `apps/web/src/lib/credentials.ts` (lazy refresh), `apps/web/src/app/api/token/route.ts` (no change expected), `apps/web/test/tesla-refresh.test.ts`, `apps/web/test/api-routes.test.ts`
+- Create: `apps/web/test/lazy-refresh.test.ts`
+
+**Interfaces:**
+- Consumes: `refreshAll({ fetch?, now?, client?, sleep? })` from Task 8; `currentAccessToken(ownerId)` from Task 9.
+- Produces:
+  - Column `tesla_credentials.refresh_lock_until timestamptz`.
+  - `refreshAll(o)` gains `ownerId?: string` (process only that row) and `force?: boolean` (ignore the 3 h window). Before calling Tesla for a row it must **claim** the lock atomically: `update tesla_credentials set refresh_lock_until = now() + interval '90 seconds' where owner_id = $1 and (refresh_lock_until is null or refresh_lock_until < now()) returning owner_id` — implemented via supabase-js as `.update({ refresh_lock_until: <iso now+90s> }).eq("owner_id", id).or("refresh_lock_until.is.null,refresh_lock_until.lt." + <iso now>).select("owner_id")`; if zero rows come back, the row is skipped with `failed` entry `{ owner_id, error: "locked" }` (not a real failure; callers treat it as "someone else is refreshing"). After the row's attempt (success or failure) release by setting `refresh_lock_until = null`.
+  - `currentAccessToken(ownerId, o?: { refreshIfStale?: boolean; fetch?; now?; client? })`: if the stored token expires within **30 minutes** (or is missing) and `refreshIfStale` is true (default **true**), call `refreshAll({ ownerId, force: true, ... })`. If the result says `locked`, wait 1.5 s (injectable `sleep`) and re-read the row up to 3 times. Return the freshest stored token that is valid for ≥60 s, else `null`.
+  - `GET /api/token` keeps its contract; it simply benefits from the lazy refresh.
+
+**Steps:**
+1. Migration 0004: `alter table tesla_credentials add column refresh_lock_until timestamptz;` and `supabase db reset`.
+2. Tests first (RED), then implementation (GREEN):
+   - `tesla-refresh.test.ts`: (a) `ownerId` filter processes only that owner; (b) a row whose `refresh_lock_until` is in the future is reported as `locked` and Tesla is **not** called; (c) after a successful rotation `refresh_lock_until` is null again; (d) after a failed rotation the lock is also released.
+   - `lazy-refresh.test.ts`: (e) with a token expiring in 10 minutes, `currentAccessToken(owner)` calls the (mocked) Tesla endpoint once and returns the new token; (f) with a token expiring in 5 hours it does not call Tesla; (g) when the row is locked by someone else and the stored token is still valid ≥60 s, it returns the stored token without calling Tesla; (h) two concurrent `currentAccessToken` calls for the same owner result in exactly one Tesla call (use `Promise.all` with the same mocked fetch counting invocations; the second must observe the lock or the freshly stored token).
+   - `api-routes.test.ts`: existing `/api/token` test must still pass; add one assertion that `/api/token` returns the refreshed token when the seeded token is near expiry (seed 10 min, mock Tesla, expect the new value).
+3. Run the whole web suite (expect 21 + 9 = 30 passed), typecheck, build.
+4. Commit: `feat(web): on-demand token refresh with per-owner claim lock` with the standard trailer.
+
+---
+
+## Execution record and follow-ups (2026-10-18)
+
+Executed on branch `slice-1a-backend` via subagent-driven development; ledger in `.superpowers/sdd/progress.md`. Tasks 1–11 and 13 complete and reviewed; Task 12 partial (GitHub + Vercel done; hosted Supabase, Tesla client secret, Upstash and partner registration await the owner). Final whole-branch review: "ready with fixes"; the before-merge fixes landed (partition RLS + default partition, Swift `Typography`, `location_data`, Sentry/Location mapping, upsert error, atomic OAuth state, usage count validation).
+
+### Plan 1A.2 — contract fixes required before Plans 1B and 1C start coding
+
+1. **Bridge token access (I-1).** The add-on has only the service key and the stored access token is stale most of the day under daily crons. Add a service-authenticated path (hashed per-owner bridge secret, `owner_id` parameter) to `/api/token`, and amend spec §4.1 and the Global Constraint about who may rotate.
+2. **Browser-safe `/auth/start` (I-2).** `ASWebAuthenticationSession` cannot send headers. Change to `POST /auth/start` (JWT) returning `{ url }`; bind state to the user and consider a one-time ticket.
+3. **Vehicle discovery (I-3).** After `storeCredentials`, call Fleet `GET /api/1/vehicles`, insert `vehicles` (vin, tesla_vehicle_id, display_name, model) and an empty `vehicle_state` row; count the call. Use VIN in Fleet paths.
+4. **Token health visibility (I-4).** Owner-scoped view/endpoint exposing `rotated_at`, `last_error`, `access_expires_at` without token columns (spec §10).
+5. **Driver/passenger door mapping (I-8).** Store driver/passenger keys (`df/pf/dr/pr`) or map using `vehicle_config.rhd`; lock the jsonb shape before 1C.
+6. **jsonb merge for partial telemetry (I-9).** Document/implement deep-merge for `tpms_bar`, `doors`, `windows`; map `DoorState`, window signals, `ChargeAmps`, `VehicleName`.
+7. **Partition extension job (I-10).** Monthly job (pg_cron preferred) creating next partitions via `secure_signals_partition`.
+8. **Rotation store fencing (I-11).** Compare-and-set the store on `refresh_token_enc` equal to the claimed ciphertext rather than on the lock; add backoff on repeated failed rotations.
+9. **Lock down sign-ups and require Upstash in production (I-12).** Owner allow-list or disable sign-ups after the first account; fail closed on missing Upstash when `VERCEL_ENV=production`.
+10. Deferred minors: budget projection by elapsed hours + server-side `budget_mode` enforcement + tighter `vehicle-data` limits; `sleep_state='asleep'` on 409; constant-time cron compare; AAD/key-version in token crypto; `FleetClient` timeout + `maxDuration` on `/api/token`; React 19 stable; owner_id consistency trigger + `updated_at` trigger; `oauth_states` cleanup; broader RLS tests; runbook `tsx --env-file`; CI.

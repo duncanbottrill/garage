@@ -1,0 +1,1 @@
+export default function L({ children }: { children: React.ReactNode }) { return <html lang="en"><body style={{ background: "#0B0F14", color: "#EAF0F6", fontFamily: "system-ui" }}>{children}</body></html>; }
