@@ -29,8 +29,8 @@ describe("refreshAll", () => {
   it("rotates once and stores the new pair", async () => {
     const { refreshAll } = await import("@/lib/tesla-refresh");
     const f = vi.fn(async (_u: any, init: any) => { expect(new URLSearchParams(init.body).get("refresh_token")).toBe("RT1"); return new Response(JSON.stringify({ access_token: "A2", refresh_token: "RT2", expires_in: 28800 }), { status: 200 }); });
-    const r1 = await refreshAll({ fetch: f as any }); expect(r1.rotated).toContain(ownerId); expect(f).toHaveBeenCalledTimes(1);
-    const r2 = await refreshAll({ fetch: f as any }); expect(r2.rotated).not.toContain(ownerId); expect(f).toHaveBeenCalledTimes(1); // fresh token → skipped
+    const r1 = await refreshAll({ fetch: f as any, ownerId }); expect(r1.rotated).toContain(ownerId); expect(f).toHaveBeenCalledTimes(1);
+    const r2 = await refreshAll({ fetch: f as any, ownerId }); expect(r2.rotated).not.toContain(ownerId); expect(f).toHaveBeenCalledTimes(1); // fresh token → skipped
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     const { data } = await admin.from("tesla_credentials").select("access_token").eq("owner_id", ownerId).single(); expect(data?.access_token).toBe("A2");
   });
@@ -38,7 +38,7 @@ describe("refreshAll", () => {
     const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
     await admin.from("tesla_credentials").update({ access_expires_at: new Date().toISOString() }).eq("owner_id", ownerId);
     const { refreshAll } = await import("@/lib/tesla-refresh");
-    const r = await refreshAll({ fetch: (async () => new Response("nope", { status: 401 })) as any });
+    const r = await refreshAll({ fetch: (async () => new Response("nope", { status: 401 })) as any, ownerId });
     expect(r.failed[0]?.owner_id).toBe(ownerId);
     const { data } = await admin.from("tesla_credentials").select("last_error").eq("owner_id", ownerId).single(); expect(data?.last_error).toMatch(/401/);
   });
@@ -50,7 +50,7 @@ describe("refreshAll", () => {
     const client = failingUpdates(admin, (o, values) => o === ownerId && !isLockWrite(values) && fails-- > 0, counter);
     const { refreshAll } = await import("@/lib/tesla-refresh");
     const f = vi.fn(async () => new Response(JSON.stringify({ access_token: "A-retry", refresh_token: "RT-B", expires_in: 28800 }), { status: 200 }));
-    const r = await refreshAll({ fetch: f as any, client, sleep: async () => {} });
+    const r = await refreshAll({ fetch: f as any, client, sleep: async () => {}, ownerId });
     expect(f).toHaveBeenCalledTimes(1); expect(counter.n).toBe(1); expect(r.rotated).toContain(ownerId);
     const { data } = await admin.from("tesla_credentials").select("access_token").eq("owner_id", ownerId).single(); expect(data?.access_token).toBe("A-retry");
   });
@@ -66,9 +66,12 @@ describe("refreshAll", () => {
     const counter = { n: 0 }; const client = failingUpdates(admin, (o, values) => o === ownerId && !isLockWrite(values), counter);
     const { refreshAll } = await import("@/lib/tesla-refresh");
     const f = vi.fn(async () => new Response(JSON.stringify({ access_token: "A-new", refresh_token: "RT-new", expires_in: 28800 }), { status: 200 }));
-    const r = await refreshAll({ fetch: f as any, client, sleep: async () => {} });
-    expect(r.failed.find(x => x.owner_id === ownerId)?.error).toMatch(/rotated_unstored/);
-    expect(r.rotated).toContain(owner2);
+    // Two separately-scoped calls (explicit ownerId each) rather than one unfiltered sweep, so
+    // a due/locked row left behind by another test file can never leak into this assertion.
+    const r1 = await refreshAll({ fetch: f as any, client, sleep: async () => {}, ownerId });
+    const r2 = await refreshAll({ fetch: f as any, client, sleep: async () => {}, ownerId: owner2 });
+    expect(r1.failed.find(x => x.owner_id === ownerId)?.error).toMatch(/rotated_unstored/);
+    expect(r2.rotated).toContain(owner2);
     expect(counter.n).toBe(4); // 3 store attempts + 1 last_error attempt, all failed, none thrown
   });
 

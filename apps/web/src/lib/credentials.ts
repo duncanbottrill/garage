@@ -23,16 +23,22 @@ export async function currentAccessToken(ownerId: string, o: { refreshIfStale?: 
   };
   let row = await read();
   if (refreshIfStale && isStale(row, now)) {
-    const result = await refreshAll({ ownerId, force: true, fetch: o.fetch, now, client: sb, sleep });
-    const locked = result.failed.some((x) => x.owner_id === ownerId && x.error === "locked");
-    if (locked) {
-      // someone else is mid-rotation for this owner — poll briefly for the result they're about to store
-      for (let i = 0; i < LOCK_WAIT_RETRIES; i++) {
-        await sleep(LOCK_WAIT_MS);
+    try {
+      const result = await refreshAll({ ownerId, refreshWithinMs: 30 * 60_000, fetch: o.fetch, now, client: sb, sleep });
+      const locked = result.failed.some((x) => x.owner_id === ownerId && x.error === "locked");
+      if (locked) {
+        // someone else is mid-rotation for this owner — poll briefly for the result they're about to store
+        for (let i = 0; i < LOCK_WAIT_RETRIES; i++) {
+          await sleep(LOCK_WAIT_MS);
+          row = await read();
+          if (!isStale(row, now)) break;
+        }
+      } else {
         row = await read();
-        if (isUsable(row, now)) break;
       }
-    } else {
+    } catch {
+      // refreshAll threw (e.g. a transient DB error) — fall back to whatever is already
+      // stored rather than surfacing a 500 from a token endpoint that can tolerate staleness.
       row = await read();
     }
   }

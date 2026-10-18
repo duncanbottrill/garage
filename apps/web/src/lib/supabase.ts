@@ -6,4 +6,8 @@ export async function userFromRequest(req: Request): Promise<{ id: string } | nu
   const e = env(); const c = createClient(e.SUPABASE_URL, e.SUPABASE_ANON_KEY, { auth: { persistSession: false } });
   const { data, error } = await c.auth.getUser(jwt); if (error || !data.user) return null; return { id: data.user.id };
 }
-export function requireCron(req: Request) { return req.headers.get("authorization") === `Bearer ${env().CRON_SECRET}`; }
+export function requireCron(req: Request) {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+  return req.headers.get("authorization") === `Bearer ${secret}`;
+}
