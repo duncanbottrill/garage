@@ -62,13 +62,31 @@ describe("row level security", () => {
   it("merge_vehicle_state merges jsonb and overwrites scalars", async () => {
     const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
     await admin.from("vehicle_state").upsert({ vehicle_id: v!.id, owner_id: a.id, soc: 50, tpms_bar: { fl: 2.9, fr: 2.9 } });
-    await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 51, tpms_bar: { rl: 2.8 }, nonsense: 1, owner_id: b.id } });
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 51, tpms_bar: { rl: 2.8 }, nonsense: 1, owner_id: b.id } });
+    expect(error).toBeNull();
     const { data: s } = await admin.from("vehicle_state").select("soc, tpms_bar, owner_id").eq("vehicle_id", v!.id).single();
     expect(Number(s?.soc)).toBe(51); expect(s?.tpms_bar).toEqual({ fl: 2.9, fr: 2.9, rl: 2.8 }); expect(s?.owner_id).toBe(a.id);
+  });
+  it("merge_vehicle_state treats a JSON null as omit, not set-to-null", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    await admin.from("vehicle_state").upsert({ vehicle_id: v!.id, owner_id: a.id, soc: 51 });
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: null } });
+    expect(error).toBeNull();
+    const { data: s } = await admin.from("vehicle_state").select("soc").eq("vehicle_id", v!.id).single();
+    expect(Number(s?.soc)).toBe(51);
+  });
+  it("merge_vehicle_state rejects a non-object patch", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: ["soc"] });
+    expect(error).not.toBeNull();
   });
   it("merge_vehicle_state is service-only", async () => {
     const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
     const { error } = await a.client.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 1 } }); expect(error).not.toBeNull();
+  });
+  it("vehicles.owner_id is immutable", async () => {
+    const { error } = await admin.from("vehicles").update({ owner_id: b.id }).eq("vin", "VINAAAA");
+    expect(error?.message).toMatch(/immutable/);
   });
   it("ensure_signals_partitions secures a far-future partition: anon is denied, other users see nothing, the owner reads it via the parent", async () => {
     const { error: rpcError } = await admin.rpc("ensure_signals_partitions", { p_months_ahead: 20 });
