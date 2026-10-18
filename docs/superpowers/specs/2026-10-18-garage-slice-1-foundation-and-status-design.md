@@ -117,7 +117,7 @@ A "Refresh now" action in More (not on Status) makes one `vehicle_data` request 
 ### 5.1 Tailscale add-on
 
 - Official HA community add-on. Options: Funnel on, serve `tcp://localhost:8443` as raw TCP on 443 (TLS terminated by the telemetry server, not by Tailscale, because the car must present its client certificate to the server).
-- Certificate for the ts.net hostname obtained with `tailscale cert` inside the add-on and mounted to the Garage Bridge add-on; renewal handled by a daily job in the bridge.
+- Certificate for the ts.net hostname obtained with `tailscale cert` inside the Tailscale add-on and written to `/share/garage/tls/` (the HA `share` folder is mountable by both add-ons). The bridge reads the cert and key from there and reloads the telemetry server when they change; a daily job in the Tailscale add-on's `post-run` script renews them.
 - If raw-TCP Funnel proves unavailable on the add-on build, fallback is router port-forward of 443 → Green:8443 with DuckDNS; the spec treats this as a documented alternative, not the plan.
 
 ### 5.2 Tesla HTTP Proxy add-on
@@ -168,8 +168,21 @@ signals(
   vehicle_id uuid, name text, value_num numeric, value_text text, value_json jsonb, recorded_at timestamptz,
   primary key (vehicle_id, name, recorded_at))  -- partitioned by month on recorded_at
 
-drives(...)          -- created in slice 1 migration as empty tables with final columns (see section 4 of the design conversation); populated in slice 2
-charges(...)
+-- drives and charges are created in the slice 1 migration with their final columns and left empty; slice 2 populates them
+drives(
+  id uuid pk, vehicle_id uuid references vehicles, started_at timestamptz, ended_at timestamptz,
+  start_lat numeric, start_lng numeric, end_lat numeric, end_lng numeric,
+  start_place_id uuid references places, end_place_id uuid references places,
+  start_odometer_km numeric, end_odometer_km numeric, distance_km numeric,
+  start_soc numeric, end_soc numeric, energy_kwh numeric, wh_per_km numeric, max_speed_kph numeric,
+  inside_c_start numeric, outside_c_start numeric, created_at timestamptz default now())
+
+charges(
+  id uuid pk, vehicle_id uuid references vehicles, started_at timestamptz, ended_at timestamptz,
+  lat numeric, lng numeric, place_id uuid references places,
+  start_soc numeric, end_soc numeric, energy_added_kwh numeric, energy_drawn_kwh numeric,
+  peak_power_kw numeric, charger_type text check (charger_type in ('ac','dc_supercharger','dc_other')),
+  cost_minor int, currency text default 'GBP', tariff_id uuid, created_at timestamptz default now())
 places(id, owner_id, name, lat, lng, radius_m, kind)
 api_usage(owner_id, category text, month date, count bigint, primary key(owner_id, category, month))
 tesla_credentials(owner_id pk, refresh_token_enc bytea, access_token text, access_expires_at timestamptz, rotated_at timestamptz)
@@ -186,7 +199,7 @@ Next.js (App Router), same conventions as tp-backend. Slice 1 routes:
 | Route | Purpose |
 |---|---|
 | `GET /.well-known/appspecific/com.tesla.3p.public-key.pem` | static public key |
-| `GET /auth/start` | builds the Tesla authorize URL with PKCE, state bound to the Supabase user |
+| `GET /auth/start` | requires a Supabase JWT; builds the Tesla authorize URL with PKCE, state bound to the Supabase user |
 | `GET /auth/callback` | exchanges code, stores encrypted refresh token, redirects to `garage://connected` |
 | `GET /api/token` | returns the current Tesla access token to an authenticated app user for proxy calls (Supabase JWT required; rate-limited via Upstash) |
 | `POST /api/usage` | app reports commands/wakes for the ledger |
@@ -202,7 +215,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 - SwiftUI, one Xcode project, targets iOS 26 and macOS 26. Swift Package `GarageKit` holds the vehicle store, command client, models and design tokens; the app target is thin.
 - **VehicleStore**: Supabase Swift SDK, Realtime subscription to `vehicle_state`; per-field freshness; last snapshot persisted in app support for instant cold launch.
 - **CommandClient**: base URL from settings (tailnet name), bearer from `/api/token`, optimistic state with `pending` markers, idempotency key per tap, 10 s timeout, typed errors mapped to copy. Detects Tailscale reachability by probing the proxy health endpoint; when unreachable, controls disable with a "Connect Tailscale" action (opens the Tailscale app).
-- **Screens**: Status (04), Climate sheet, Charge sheet, More, Onboarding (sign in with Tesla via `ASWebAuthenticationSession` → `garage://connected`; confirm vehicle; check Tailscale). Drives, Charges, Battery tabs ship with designed empty states.
+- **Screens**: Status (04), Climate sheet, Charge sheet, More, Onboarding. Onboarding has four steps: (1) Sign in with Apple, which creates the Supabase account that owns everything; (2) Connect Tesla via `ASWebAuthenticationSession` to `/auth/start`, returning on `garage://connected`; (3) confirm the vehicle (one in slice 1, picker later); (4) check Tailscale reachability of the proxy, with instructions and the pairing deep link if the key is not yet paired. Drives, Charges, Battery tabs ship with designed empty states.
 - **Navigation**: iPhone `TabView` with the iOS 26 floating glass tab bar; Mac `NavigationSplitView` sidebar with the same five sections and a two-column Status (map left, sheet content right).
 - **Map**: MapKit with a dark standard style, car annotation with a breathing halo while `bridge_seen_at` is fresh, recent trail from the last 30 minutes of `Location` signals.
 - **Design system**: `GarageKit/Design` generated from `packages/tokens/tokens.json` (colours, type scale, radii, spacing). Big Shoulders Display and Instrument Sans bundled (OFL).
@@ -230,7 +243,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 
 ## 11. Security
 
-- Private key only on the Green; refresh token only in Supabase (encrypted); the app holds a Supabase session and a short-lived Tesla access token in memory.
+- Private key only on the Green; refresh token only in Supabase (encrypted); the app holds a Supabase session and a short-lived Tesla access token in memory. A leaked access token cannot move the car: 2021+ vehicles reject unsigned commands and the signing key is only on the Green.
 - RLS on every table from migration 0001.
 - Proxy bound to the tailnet interface; Funnel exposes only the telemetry receiver, which enforces Tesla client-certificate mTLS.
 - Vercel routes require a Supabase JWT; crons require a secret header; Upstash rate limits on `/api/token`, `/api/vehicle-data`, `/api/usage`.
