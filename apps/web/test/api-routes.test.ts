@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, vi, afterEach } from "vitest";
 import { createClient } from "@supabase/supabase-js";
+import { encryptToken } from "@garage/core";
 let jwt = "", ownerId = "", vehicleId = "";
 beforeAll(async () => {
   Object.assign(process.env, { TESLA_CLIENT_ID: "cid", TESLA_CLIENT_SECRET: "sec", TESLA_REDIRECT_URI: "https://g/cb", TESLA_FLEET_BASE: "https://fleet.test", TOKEN_ENC_KEY: Buffer.alloc(32, 1).toString("base64"), CRON_SECRET: "c", APP_RETURN_URL: "garage://x" });
@@ -17,6 +18,21 @@ describe("api routes", () => {
     const { GET } = await import("@/app/api/token/route");
     expect((await GET(new Request("http://g/api/token"))).status).toBe(401);
     const r = await GET(new Request("http://g/api/token", { headers: H() })); expect((await r.json()).access_token).toBe("TOK");
+  });
+  it("token refreshes a near-expiry token before returning it", async () => {
+    const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+    await admin.auth.admin.createUser({ email: "api-near-expiry@test.local", password: "pass-1234", email_confirm: true }).catch(() => {});
+    const c = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!);
+    const s = await c.auth.signInWithPassword({ email: "api-near-expiry@test.local", password: "pass-1234" });
+    const jwt2 = s.data.session!.access_token; const owner2 = s.data.user!.id;
+    await admin.from("tesla_credentials").upsert({ owner_id: owner2, refresh_token_enc: "\\x" + Buffer.from(encryptToken("RT-API", process.env.TOKEN_ENC_KEY!)).toString("hex"), access_token: "OLD-API", access_expires_at: new Date(Date.now() + 10 * 60_000).toISOString() });
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => String(u).includes("auth.tesla.com")
+      ? new Response(JSON.stringify({ access_token: "NEW-API", refresh_token: "RT-API2", expires_in: 28800 }), { status: 200 })
+      : real(u, init)));
+    const { GET } = await import("@/app/api/token/route");
+    const r = await GET(new Request("http://g/api/token", { headers: { authorization: `Bearer ${jwt2}` } }));
+    expect((await r.json()).access_token).toBe("NEW-API");
   });
   it("usage increments the ledger", async () => {
     const { POST } = await import("@/app/api/usage/route");
