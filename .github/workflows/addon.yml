@@ -20,9 +20,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: pnpm install (workspace deps for @garage/core)
+        # The ingest's tsconfig maps @garage/core to packages/core/src, so
+        # tsc also type-checks core's own imports (@noble/ciphers, ...).
+        run: pnpm install --frozen-lockfile --filter @garage/core
 
       - name: npm ci (ingest)
         working-directory: garage-bridge/ingest
