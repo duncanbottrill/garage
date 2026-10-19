@@ -33,22 +33,28 @@ RUN npm run build
 # "symbol not found: pthread_cond_clockwait"). We will run the real
 # telemetry service in a later task, so the runtime needs glibc.
 FROM ${BUILD_FROM}
+ARG BUILD_ARCH=aarch64
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl jq openssl gnupg \
+      ca-certificates curl jq openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Tailscale from its official apt repo for Debian bookworm. `tailscale`
-# pulls in `tailscaled` as well.
+# pulls in `tailscaled` as well. The keyring is fetched pre-dearmored
+# (`.noarmor.gpg`), so no `gnupg` package is needed at all. Pinned to the
+# version the last build resolved and held so a later `apt-get upgrade`
+# inside this image can't silently drift it.
 RUN mkdir -p /usr/share/keyrings \
     && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
     && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list \
-    && apt-get update && apt-get install -y --no-install-recommends tailscale \
+    && apt-get update && apt-get install -y --no-install-recommends tailscale=1.104.1 \
+    && apt-mark hold tailscale \
     && rm -rf /var/lib/apt/lists/*
 
 # Node 22 runtime: the ingest bundle is a self-contained esbuild output with
 # no runtime node_modules, so only the `node` binary is needed, not a full
-# Node image or apt's (older) nodejs package.
-COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+# Node image or apt's (older) nodejs package. Pinned by digest (manifest
+# list, resolves to the right platform) for reproducibility.
+COPY --from=node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 /usr/local/bin/node /usr/local/bin/node
 
 COPY --from=proxy /out/tesla-http-proxy /usr/bin/tesla-http-proxy
 COPY --from=telemetry /fleet-telemetry /usr/bin/fleet-telemetry
@@ -60,4 +66,4 @@ RUN mkdir -p /usr/share/garage \
 
 COPY addon/garage-bridge/rootfs/ /
 RUN chmod a+x /etc/s6-overlay/s6-rc.d/*/run /etc/s6-overlay/s6-rc.d/*/finish /usr/bin/garage-* 2>/dev/null || true
-LABEL io.hass.version="0.1.0" io.hass.type="addon" io.hass.arch="aarch64|amd64"
+LABEL io.hass.version="0.1.0" io.hass.type="addon" io.hass.arch="${BUILD_ARCH}"

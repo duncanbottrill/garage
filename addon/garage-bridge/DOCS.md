@@ -46,6 +46,21 @@ each placeholder with its real implementation.
 `9090/tcp` exposes `fleet-telemetry`'s Prometheus metrics internally; it is
 also used as the add-on's watchdog check.
 
+## Building locally
+
+Docker on this Mac is Colima (arm64 native), so `docker build` produces the
+same architecture as the Green. From the repo root:
+
+```
+docker build \
+  --build-arg BUILD_FROM=ghcr.io/home-assistant/aarch64-base-debian:bookworm \
+  --build-arg BUILD_ARCH=aarch64 \
+  -f addon/garage-bridge/Dockerfile -t garage-bridge:dev .
+```
+
+`BUILD_ARCH` defaults to `aarch64` and feeds the `io.hass.arch` label; pass
+`amd64` (with a matching `BUILD_FROM`) when building for that architecture.
+
 ## Status
 
 Skeleton only — services are placeholders. Not yet functional end to end.

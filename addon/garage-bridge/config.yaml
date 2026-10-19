@@ -39,7 +39,7 @@ schema:
   tesla_vin: str
   garage_api_base: url
   bridge_secret: password?
-  supabase_url: url
+  supabase_url: url?
   supabase_service_key: password?
   mqtt_host: str
   mqtt_port: port
