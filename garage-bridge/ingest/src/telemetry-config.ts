@@ -279,16 +279,54 @@ function sameFieldKeySet(ours: CadenceTable, theirs: unknown): boolean {
  * True when a poll's `synced: true` should be trusted as confirmation of
  * OUR desired config, not of some other config the vehicle happens to have
  * already synced (e.g. a stale one from before a POST failure, or another
- * bridge's). When the response omits `config` entirely, `synced` is taken
- * at face value. When `config` IS present, both its `hostname` and the key
- * set of its `fields` must match ours before the confirmation is trusted.
+ * bridge's). The response MUST carry a `config` object whose `hostname` and
+ * `fields` key set match ours: a missing or `null` config proves nothing
+ * about what the car is actually streaming, so it never confirms.
  */
 function configMatches(responseConfig: unknown, fqdn: string, fields: CadenceTable): boolean {
-  if (responseConfig === undefined || responseConfig === null) return true;
-  if (typeof responseConfig !== "object") return false;
+  if (!responseConfig || typeof responseConfig !== "object") return false;
   const cfg = responseConfig as Record<string, unknown>;
   if (cfg.hostname !== fqdn) return false;
   return sameFieldKeySet(fields, cfg.fields);
+}
+
+/**
+ * A poll payload counts as synced only when Tesla says `synced: true`, the
+ * reported config is ours (see `configMatches`), and the virtual key is not
+ * reported as unpaired (`key_paired: false` means the car will not stream
+ * whatever config it holds).
+ */
+function isOurConfigSynced(payload: Record<string, unknown>, fqdn: string, fields: CadenceTable): boolean {
+  if (payload.synced !== true) return false;
+  if (payload.key_paired === false) return false;
+  return configMatches(payload.config, fqdn, fields);
+}
+
+const SKIP_REASONS = ["missing_key", "unsupported_hardware", "unsupported_firmware", "max_configs"] as const;
+
+/**
+ * Tesla answers a fleet_telemetry_config POST with HTTP 200 even when it
+ * did not apply the config to a VIN, listing it under
+ * `response.skipped_vehicles.<reason>` instead (e.g. `missing_key` when the
+ * virtual key is not paired). Returns `skipped:<reason>` when our VIN was
+ * skipped (or `skipped:not_updated` when `updated_vehicles` is explicitly 0
+ * without naming a reason), otherwise null (accepted).
+ */
+function postSkipReason(text: string, vin: string): string | null {
+  const payload = extractPayload(parseJsonSafe(text));
+  const skipped = payload.skipped_vehicles;
+  if (skipped && typeof skipped === "object") {
+    const lists = skipped as Record<string, unknown>;
+    for (const reason of SKIP_REASONS) {
+      const list = lists[reason];
+      if (Array.isArray(list) && list.includes(vin)) return `skipped:${reason}`;
+    }
+    for (const [reason, list] of Object.entries(lists)) {
+      if (Array.isArray(list) && list.includes(vin)) return `skipped:${reason}`;
+    }
+  }
+  if (payload.updated_vehicles === 0) return "skipped:not_updated";
+  return null;
 }
 
 /**
@@ -380,7 +418,7 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
   /**
    * Runs up to `maxAttempts` polls, 15s apart, for `hash`. Confirms and
    * clears `reg` the moment a poll reports a trustworthy `synced: true`
-   * (see `configMatches`). `isFirstRun` (the run immediately following an
+   * (see `isOurConfigSynced`). `isFirstRun` (the run immediately following an
    * accepted POST, within the same `ensure()` call) also fetches
    * `fleet_telemetry_errors` once the attempts are exhausted.
    *
@@ -410,7 +448,7 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
       }
 
       const payload = extractPayload(parseJsonSafe(outcome.text));
-      if (outcome.res.ok && payload.synced === true && configMatches(payload.config, ctx.fqdn, fields)) {
+      if (outcome.res.ok && isOurConfigSynced(payload, ctx.fqdn, fields)) {
         const confirmedAt = clock().toISOString();
         await opts.sink.setTelemetryConfig({ hash, version: (vehicle.configVersion ?? 0) + 1, confirmedAt, lastError: null });
         reg = null;
@@ -452,12 +490,17 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
         body: JSON.stringify({ vins: [opts.vin], config }),
       });
 
-      if (!postOutcome.res.ok) {
+      // A 2xx POST that skipped our VIN (e.g. `missing_key`: the virtual
+      // key is not paired yet) is a failure too: the car never got the
+      // config, so polling would either spin or confirm something stale.
+      const skipReason = postOutcome.res.ok ? postSkipReason(postOutcome.text, opts.vin) : null;
+
+      if (!postOutcome.res.ok || skipReason !== null) {
         // A double-401 (after callChecked's own forced-refresh retry) lands
         // here too, now that callChecked never throws: it's just another
         // non-2xx POST outcome, stored and backed off like any other.
         const postAttempts = (reg?.postAttempts ?? 0) + 1;
-        const message = `post ${postOutcome.res.status}: ${postOutcome.text.slice(0, 300)}`;
+        const message = skipReason ?? `post ${postOutcome.res.status}: ${postOutcome.text.slice(0, 300)}`;
         const freshNow = clock().getTime();
         const nextPostAt = freshNow + Math.min(INITIAL_POST_BACKOFF_MS * 2 ** (postAttempts - 1), MAX_POST_BACKOFF_MS);
         // reg (backoff state) is updated BEFORE the setTelemetryConfig write:
