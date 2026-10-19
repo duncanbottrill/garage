@@ -1,5 +1,5 @@
 name: "Garage Bridge"
-version: "0.1.0"
+version: "0.2.0"
 slug: "garage_bridge"
 description: "Tesla Fleet Telemetry receiver, command signing proxy and Supabase ingest for Garage"
 url: "https://github.com/duncanbottrill/garage"
@@ -12,14 +12,17 @@ map:
   - type: share
     read_only: false
 ports:
+  "8443/tcp": 8443
   "9090/tcp": null
 ports_description:
+  "8443/tcp": "Fleet Telemetry receiver (mTLS) — forward external TCP 443 here"
   "9090/tcp": "fleet-telemetry Prometheus metrics (internal)"
 watchdog: "tcp://[HOST]:[PORT:9090]"
 options:
   tailscale_enabled: true
   tailscale_authkey: ""
   tailscale_hostname: "garage-bridge"
+  telemetry_hostname: ""
   tesla_private_key: ""
   tesla_vin: ""
   garage_api_base: "https://garage.duncanbottrill.com"
@@ -35,6 +38,7 @@ schema:
   tailscale_enabled: bool
   tailscale_authkey: password?
   tailscale_hostname: str
+  telemetry_hostname: str?
   tesla_private_key: password?
   tesla_vin: str
   garage_api_base: url

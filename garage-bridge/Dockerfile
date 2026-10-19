@@ -71,4 +71,4 @@ RUN mkdir -p /usr/share/garage \
 
 COPY garage-bridge/rootfs/ /
 RUN chmod a+x /etc/s6-overlay/s6-rc.d/*/run /etc/s6-overlay/s6-rc.d/*/finish /usr/bin/garage-* 2>/dev/null || true
-LABEL io.hass.version="0.1.0" io.hass.type="addon" io.hass.arch="${BUILD_ARCH}"
+LABEL io.hass.version="0.2.0" io.hass.type="addon" io.hass.arch="${BUILD_ARCH}"
