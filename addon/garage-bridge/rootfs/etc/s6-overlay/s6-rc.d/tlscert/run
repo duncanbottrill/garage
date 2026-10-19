@@ -1,4 +1,50 @@
 #!/command/with-contenv bashio
-# placeholder until the real service lands in a later task
-bashio::log.info "tlscert: placeholder"
-exec sleep infinity
+# Fetches/renews the Let's Encrypt cert for this node's Tailscale FQDN via
+# `tailscale cert`, then builds /data/tls/ca.pem (the intermediate chain,
+# with the ISRG Root X1 baked at build time appended if it isn't already
+# part of the chain `tailscale cert` returned). Loops forever, re-checking
+# every 24h; idempotent since `tailscale cert` just re-issues/reuses the
+# same cert for the same FQDN.
+set -euo pipefail
+
+if ! bashio::config.true 'tailscale_enabled'; then
+  bashio::log.warning "tlscert: tailscale disabled, expecting /data/tls to be provided"
+  exec sleep infinity
+fi
+
+TS=(tailscale --socket=/run/tailscale/tailscaled.sock)
+mkdir -p /data/tls
+
+while true; do
+  FQDN="$(cat /data/tailscale/fqdn)"
+
+  if "${TS[@]}" cert --cert-file /data/tls/server.crt --key-file /data/tls/server.key "${FQDN}"; then
+    # Chain without the leaf: everything after the first certificate block.
+    awk 'BEGIN{n=0} /BEGIN CERTIFICATE/{n++} n>=2{print}' /data/tls/server.crt > /data/tls/ca.pem
+
+    # Append the build-time-baked ISRG Root X1 unless the chain `tailscale
+    # cert` returned already ends in it. A plain PEM certificate is just
+    # base64 DER, so it never contains its own subject name as readable
+    # text (grepping for "ISRG Root X1" would never match and would
+    # append a duplicate root on every refresh) — compare the SHA-256
+    # fingerprint of the chain's last block against the baked root
+    # instead, so the root is appended exactly once.
+    if [ -f /usr/share/garage/isrgrootx1.pem ]; then
+      ISRG_FP="$(openssl x509 -noout -fingerprint -sha256 -in /usr/share/garage/isrgrootx1.pem 2>/dev/null || true)"
+      LAST_BLOCK="$(awk '/BEGIN CERTIFICATE/{n++} {blk[n]=blk[n] $0 ORS} END{print blk[n]}' /data/tls/ca.pem)"
+      LAST_FP="$(printf '%s' "${LAST_BLOCK}" | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)"
+      if [ -z "${LAST_FP}" ] || [ "${LAST_FP}" != "${ISRG_FP}" ]; then
+        cat /usr/share/garage/isrgrootx1.pem >> /data/tls/ca.pem
+      fi
+    fi
+
+    chmod 600 /data/tls/server.key
+    bashio::log.info "tlscert: certificate for ${FQDN} refreshed"
+  else
+    bashio::log.error "tlscert: tailscale cert failed; retrying in 10 minutes"
+    sleep 600
+    continue
+  fi
+
+  sleep 86400
+done

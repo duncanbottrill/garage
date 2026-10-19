@@ -1,4 +1,53 @@
 #!/command/with-contenv bashio
-# placeholder until the real service lands in a later task
-bashio::log.info "tailscale: placeholder"
-exec sleep infinity
+# Brings up the Tailscale node (userspace networking) for this add-on,
+# waits for it to reach the Running backend state, records the assigned
+# FQDN to /data/tailscale/fqdn, then hands off to garage-tailscale-publish
+# to expose the funnel/serve routes. Idempotent: `tailscale up` with the
+# same authkey/hostname on a node that is already up is a no-op re-auth,
+# and /data/tailscale persists node state across container restarts.
+set -euo pipefail
+
+if ! bashio::config.true 'tailscale_enabled'; then
+  bashio::log.warning "tailscale disabled (dev mode)"
+  exec sleep infinity
+fi
+
+mkdir -p /data/tailscale /run/tailscale
+
+AUTHKEY="$(bashio::config 'tailscale_authkey')"
+HOSTNAME_TS="$(bashio::config 'tailscale_hostname')"
+
+tailscaled \
+  --tun=userspace-networking \
+  --state=/data/tailscale/tailscaled.state \
+  --socket=/run/tailscale/tailscaled.sock &
+TSD=$!
+
+for _ in $(seq 1 30); do
+  [ -S /run/tailscale/tailscaled.sock ] && break
+  sleep 1
+done
+
+tailscale --socket=/run/tailscale/tailscaled.sock up \
+  --authkey="${AUTHKEY}" \
+  --hostname="${HOSTNAME_TS}" \
+  --accept-dns=false \
+  --reset
+
+for _ in $(seq 1 60); do
+  if tailscale --socket=/run/tailscale/tailscaled.sock status --json \
+      | jq -e '.BackendState=="Running"' >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+
+FQDN="$(tailscale --socket=/run/tailscale/tailscaled.sock status --json \
+  | jq -r '.Self.DNSName' | sed 's/\.$//')"
+echo "${FQDN}" > /data/tailscale/fqdn
+
+bashio::log.info "tailscale up as ${FQDN}"
+
+/usr/bin/garage-tailscale-publish
+
+wait "${TSD}"

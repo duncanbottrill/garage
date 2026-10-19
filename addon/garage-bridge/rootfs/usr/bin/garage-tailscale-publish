@@ -1,0 +1,18 @@
+#!/command/with-contenv bashio
+# Publishes the add-on's TCP ports through Tailscale Funnel/Serve.
+# Idempotent: `tailscale serve`/`funnel --bg` re-applying the same mapping
+# just confirms the existing config rather than erroring.
+set -euo pipefail
+
+TS=(tailscale --socket=/run/tailscale/tailscaled.sock)
+
+"${TS[@]}" serve --bg --tcp=443 tcp://127.0.0.1:8443
+
+if ! "${TS[@]}" funnel --bg 443 on; then
+  "${TS[@]}" funnel --bg --tcp=443 tcp://127.0.0.1:8443
+fi
+
+"${TS[@]}" serve --bg --tcp=4443 tcp://127.0.0.1:4443
+
+"${TS[@]}" funnel status || true
+"${TS[@]}" serve status || true
