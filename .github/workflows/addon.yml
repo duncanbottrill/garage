@@ -2,18 +2,16 @@ name: Garage Bridge add-on
 
 on:
   push:
+    # No `paths` filter: a tag push carries no commit diff, so a paths filter
+    # could silently skip the release build. The test job is cheap enough to
+    # run on every push to main.
     branches: [main]
-    paths:
-      - "garage-bridge/**"
-      - "packages/core/**"
-      - ".github/workflows/addon.yml"
     tags:
       - "bridge-v*"
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   test:
@@ -58,6 +56,9 @@ jobs:
   build:
     name: Build + push (${{ matrix.arch }})
     needs: test
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
