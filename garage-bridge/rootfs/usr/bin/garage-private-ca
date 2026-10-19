@@ -12,11 +12,15 @@
 #   ${GARAGE_DATA_DIR:-/data}/tls/server.crt  leaf cert ONLY (no chain), 90 days
 #   ${GARAGE_DATA_DIR:-/data}/tls/ca.pem      copy of the CA cert (sent to Tesla)
 #
-# Idempotent. Creates the CA when either half is missing (or the CA cert
-# expires within 30 days). Issues a new leaf when there is none, when it
-# expires within 30 days, when its SAN does not contain DNS:<hostname>, when
-# it no longer verifies against the CA (the CA was replaced) or when its key
-# is missing. Every file is written to a temp path and moved into place.
+# Idempotent. Creates the CA when either half is missing, when the CA cert
+# expires within 30 days or when ca.key is not the key of ca.pem (and then,
+# since the old leaf no longer verifies, re-issues the leaf). Issues a new
+# leaf when there is none, when it expires within 30 days, when its SAN does
+# not contain DNS:<hostname>, when it no longer verifies against the CA (the
+# CA was replaced), when its key is missing or when server.key is not the
+# key of server.crt. The leaf subject carries no CN (a CN is limited to 64
+# characters, a DNS name to 253); clients match the SAN. Every file is
+# written to a temp path and moved into place.
 #
 # Prints exactly one word on stdout: "issued" (no leaf existed), "renewed"
 # (an existing leaf was replaced) or "unchanged", so the caller knows whether
@@ -75,10 +79,20 @@ serial() {
   printf '0x%s' "$(openssl rand -hex 16)"
 }
 
+# True when the private key $2 belongs to the certificate $1 (their public
+# keys are identical). Prints nothing.
+key_matches_cert() {
+  local cert_pub key_pub
+  cert_pub="$(openssl x509 -in "$1" -noout -pubkey 2>/dev/null)" || return 1
+  key_pub="$(openssl pkey -in "$2" -pubout 2>/dev/null)" || return 1
+  [ -n "${cert_pub}" ] && [ "${cert_pub}" = "${key_pub}" ]
+}
+
 # --- CA ---------------------------------------------------------------
 ca_valid() {
   [ -s "${CA_KEY}" ] && [ -s "${CA_PEM}" ] \
-    && openssl x509 -in "${CA_PEM}" -noout -checkend "${RENEW_BEFORE_S}" >/dev/null 2>&1
+    && openssl x509 -in "${CA_PEM}" -noout -checkend "${RENEW_BEFORE_S}" >/dev/null 2>&1 \
+    && key_matches_cert "${CA_PEM}" "${CA_KEY}"
 }
 
 if ! ca_valid; then
@@ -115,7 +129,8 @@ leaf_ok() {
   [ -s "${LEAF_CRT}" ] && [ -s "${LEAF_KEY}" ] \
     && openssl x509 -in "${LEAF_CRT}" -noout -checkend "${RENEW_BEFORE_S}" >/dev/null 2>&1 \
     && leaf_has_host \
-    && openssl verify -CAfile "${CA_PEM}" "${LEAF_CRT}" >/dev/null 2>&1
+    && openssl verify -CAfile "${CA_PEM}" "${LEAF_CRT}" >/dev/null 2>&1 \
+    && key_matches_cert "${LEAF_CRT}" "${LEAF_KEY}"
 }
 
 STATUS=unchanged
@@ -127,7 +142,7 @@ if ! leaf_ok; then
 distinguished_name = dn
 prompt = no
 [dn]
-CN = ${HOST}
+O = Garage Bridge
 [v3_leaf]
 basicConstraints = critical,CA:false
 keyUsage = digitalSignature
