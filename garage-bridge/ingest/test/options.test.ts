@@ -72,6 +72,14 @@ describe("loadOptions", () => {
     expect(opts.telemetry_hostname).toBe("telemetry-1.garage.duncanbottrill.com");
   });
 
+  it("trims only ASCII whitespace, like tlscert/run (a pasted non-breaking space is rejected)", () => {
+    expect(() => loadOptions(optionsFile({ telemetry_hostname: "\u00a0telemetry.duncanbottrill.com" }))).toThrow(/is not a valid hostname/);
+  });
+
+  it("lower-cases only ASCII letters, like tlscert/run (a Kelvin sign is not folded to k)", () => {
+    expect(() => loadOptions(optionsFile({ telemetry_hostname: "\u212Aelvin.duncanbottrill.com" }))).toThrow(/is not a valid hostname/);
+  });
+
   it("still reads the existing options unchanged", () => {
     const opts = loadOptions(optionsFile({ telemetry_hostname: "telemetry.garage.duncanbottrill.com" }));
     expect(opts.tesla_vin).toBe("XP7YTEST00000001");

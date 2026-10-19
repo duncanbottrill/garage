@@ -83,7 +83,11 @@ const HOSTNAME_CHARS = /^[a-z0-9.-]+$/;
 
 function asHostname(v: unknown): string | undefined {
   if (typeof v !== "string") return undefined;
-  const trimmed = v.trim().toLowerCase();
+  // ASCII whitespace and ASCII letters only: the same sets bash's [:space:]
+  // and `tr '[:upper:]' '[:lower:]'` use in tlscert/run.
+  const trimmed = v
+    .replace(/^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g, "")
+    .replace(/[A-Z]/g, (c) => c.toLowerCase());
   if (trimmed.length === 0) return undefined;
   if (!HOSTNAME_CHARS.test(trimmed)) {
     throw new Error(

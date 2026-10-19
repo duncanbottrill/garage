@@ -22,13 +22,27 @@
 # hostname is written to /data/telemetry-hostname, which the ingest waits
 # for before registering (so it never sends a CA chain left over from the
 # tailnet mode). Without the option, the Tailscale-cert path below runs
-# unchanged.
+# unchanged, apart from removing a marker a hostname-mode run left behind.
+#
+# The option is normalised exactly as the ingest's options.ts does it:
+# leading/trailing whitespace trimmed, lower-cased, and anything left that
+# is not [a-z0-9.-] (inner whitespace included) is an error: logged, then
+# this service idles until the option is fixed.
 set -euo pipefail
 
 TELEMETRY_HOSTNAME=""
 if bashio::config.has_value 'telemetry_hostname'; then
-  # Hostnames contain no whitespace; strip any pasted along with it.
-  TELEMETRY_HOSTNAME="$(bashio::config 'telemetry_hostname' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  TELEMETRY_HOSTNAME="$(bashio::config 'telemetry_hostname')"
+  # Trim leading, then trailing whitespace (newlines included).
+  TELEMETRY_HOSTNAME="${TELEMETRY_HOSTNAME#"${TELEMETRY_HOSTNAME%%[![:space:]]*}"}"
+  TELEMETRY_HOSTNAME="${TELEMETRY_HOSTNAME%"${TELEMETRY_HOSTNAME##*[![:space:]]}"}"
+  TELEMETRY_HOSTNAME="$(printf '%s' "${TELEMETRY_HOSTNAME}" | tr '[:upper:]' '[:lower:]')"
+fi
+
+if [ -n "${TELEMETRY_HOSTNAME}" ] && [[ ! "${TELEMETRY_HOSTNAME}" =~ ^[a-z0-9.-]+$ ]]; then
+  rm -f /data/telemetry-hostname
+  bashio::log.error "tlscert: telemetry_hostname '${TELEMETRY_HOSTNAME}' is not a valid hostname: use letters, digits, dots and hyphens only, with no spaces (e.g. telemetry.duncanbottrill.com). Idling until the option is fixed."
+  exec sleep infinity
 fi
 
 if [ -n "${TELEMETRY_HOSTNAME}" ]; then
@@ -68,6 +82,10 @@ if [ -n "${TELEMETRY_HOSTNAME}" ]; then
     sleep 86400
   done
 fi
+
+# Tailscale (fallback) mode: a marker from an earlier hostname-mode run
+# must not make the ingest register that hostname against this chain.
+rm -f /data/telemetry-hostname
 
 if ! bashio::config.true 'tailscale_enabled'; then
   bashio::log.warning "tlscert: tailscale disabled, expecting /data/tls to be provided"
