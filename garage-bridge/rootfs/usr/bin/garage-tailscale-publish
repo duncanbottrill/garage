@@ -29,7 +29,7 @@ if bashio::config.has_value 'telemetry_hostname'; then
 fi
 
 if [ -n "${TELEMETRY_HOSTNAME}" ]; then
-  bashio::log.info "tailscale: telemetry_hostname is set; not publishing 443 through Funnel (telemetry arrives via the router port-forward), serving only 4443 to the tailnet"
+  bashio::log.info "tailscale: telemetry_hostname is set; not publishing 443 through Funnel (telemetry arrives via the router port-forward or a relay), serving 4443 and 8443 to the tailnet only"
   "${TS[@]}" funnel --bg 443 off >/dev/null 2>&1 || true
   "${TS[@]}" funnel --tcp=443 off >/dev/null 2>&1 || true
   "${TS[@]}" serve --tcp=443 off >/dev/null 2>&1 || true
