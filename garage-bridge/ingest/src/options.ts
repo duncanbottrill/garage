@@ -6,6 +6,14 @@ export interface IngestOptions {
   tailscale_enabled: boolean;
   tailscale_authkey: string | undefined;
   tailscale_hostname: string;
+  /**
+   * Public telemetry hostname under the Tesla partner domain (e.g.
+   * `telemetry.garage.duncanbottrill.com`). When set, the add-on serves
+   * fleet-telemetry with a leaf from its own private CA and registers this
+   * hostname with Tesla instead of the tailnet FQDN. Trimmed and
+   * lower-cased; empty or whitespace-only means unset.
+   */
+  telemetry_hostname?: string;
   tesla_private_key: string | undefined;
   tesla_vin: string;
   garage_api_base: string;
@@ -50,6 +58,7 @@ export function loadOptions(path = "/data/options.json"): IngestOptions {
     tailscale_enabled: tailscaleEnabled,
     tailscale_authkey: asString(raw.tailscale_authkey),
     tailscale_hostname: asString(raw.tailscale_hostname) ?? "garage-bridge",
+    telemetry_hostname: asHostname(raw.telemetry_hostname),
     tesla_private_key: asString(raw.tesla_private_key),
     tesla_vin: asString(raw.tesla_vin)!,
     garage_api_base: asString(raw.garage_api_base) ?? "https://garage.duncanbottrill.com",
@@ -66,4 +75,10 @@ export function loadOptions(path = "/data/options.json"): IngestOptions {
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function asHostname(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const trimmed = v.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
