@@ -32,7 +32,7 @@ fi
 # Never log the key itself.
 umask 0177
 if ! printf '%s\n' "${PRIVATE_KEY}" | /usr/bin/garage-normalize-pem > /data/private-key.pem.tmp \
-    || ! openssl ec -in /data/private-key.pem.tmp -noout >/dev/null 2>&1; then
+    || ! openssl pkey -in /data/private-key.pem.tmp -noout -text 2>/dev/null | grep -q 'ASN1 OID: prime256v1'; then
   rm -f /data/private-key.pem.tmp
   bashio::log.error "proxy: tesla_private_key is not a valid PEM private key. Paste the whole file, including the -----BEGIN/END----- lines; in the YAML editor use the block form 'tesla_private_key: |' with the key indented on the following lines (see the add-on Documentation). Idling until the option is fixed."
   exec sleep infinity
