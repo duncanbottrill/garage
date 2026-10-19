@@ -32,7 +32,7 @@ tailscaled \
   --state=/data/tailscale/tailscaled.state \
   --socket="${SOCK}" &
 TSD=$!
-trap 'kill "${TSD}" 2>/dev/null || true' EXIT
+trap 'kill "${TSD}" 2>/dev/null || true; wait "${TSD}" 2>/dev/null || true' EXIT
 # A TERM/INT from s6 must still run the EXIT trap (and so stop tailscaled).
 trap 'exit 143' TERM INT
 
@@ -50,7 +50,7 @@ for _ in $(seq 1 30); do
 done
 [ -S "${SOCK}" ] || fail "tailscaled did not create ${SOCK} within 30 s; restarting"
 
-if ! "${TS[@]}" up \
+if ! "${TS[@]}" up --timeout=60s \
     --authkey="${AUTHKEY}" \
     --hostname="${HOSTNAME_TS}" \
     --accept-dns=false \
