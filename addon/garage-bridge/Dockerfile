@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:3.21
+ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base-debian:bookworm
 ARG BUILD_ARCH=aarch64
 
 # --- tesla-http-proxy from vehicle-command ---
@@ -28,13 +28,36 @@ ENV CORE_PATH=/core/src/index.ts
 RUN npm run build
 
 # --- runtime ---
+# Debian bookworm, not Alpine: the official fleet-telemetry binary is
+# glibc-linked (see Task 1 finding 4 — it fails under musl+gcompat with
+# "symbol not found: pthread_cond_clockwait"). We will run the real
+# telemetry service in a later task, so the runtime needs glibc.
 FROM ${BUILD_FROM}
-# tailscale is in Alpine's community repo; the HA base image already enables
-# both main and community in /etc/apk/repositories, so no edit is needed here.
-RUN apk add --no-cache nodejs tailscale ca-certificates jq openssl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl jq openssl gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Tailscale from its official apt repo for Debian bookworm. `tailscale`
+# pulls in `tailscaled` as well.
+RUN mkdir -p /usr/share/keyrings \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update && apt-get install -y --no-install-recommends tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 runtime: the ingest bundle is a self-contained esbuild output with
+# no runtime node_modules, so only the `node` binary is needed, not a full
+# Node image or apt's (older) nodejs package.
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+
 COPY --from=proxy /out/tesla-http-proxy /usr/bin/tesla-http-proxy
 COPY --from=telemetry /fleet-telemetry /usr/bin/fleet-telemetry
 COPY --from=ingest /src/dist /app/ingest/dist
+
+# ISRG Root X1, used by Task 2's cert script.
+RUN mkdir -p /usr/share/garage \
+    && curl -fsSL https://letsencrypt.org/certs/isrgrootx1.pem -o /usr/share/garage/isrgrootx1.pem
+
 COPY addon/garage-bridge/rootfs/ /
 RUN chmod a+x /etc/s6-overlay/s6-rc.d/*/run /etc/s6-overlay/s6-rc.d/*/finish /usr/bin/garage-* 2>/dev/null || true
 LABEL io.hass.version="0.1.0" io.hass.type="addon" io.hass.arch="aarch64|amd64"
