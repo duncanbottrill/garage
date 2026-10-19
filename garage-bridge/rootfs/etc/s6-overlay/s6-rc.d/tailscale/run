@@ -5,6 +5,14 @@
 # to expose the funnel/serve routes. Idempotent: `tailscale up` with the
 # same authkey/hostname on a node that is already up is a no-op re-auth,
 # and /data/tailscale persists node state across container restarts.
+#
+# Failure handling: tailscaled runs in the background, so an EXIT trap
+# kills it whenever this script exits; otherwise s6's restart would start a
+# second tailscaled that collides with the orphan on its socket/state. Any
+# failure (socket never appears, `tailscale up` fails, the node never
+# reaches Running or has no FQDN, Funnel cannot be enabled) logs the likely
+# cause, sleeps 30 s so the restart is not a tight loop, and exits 1. An
+# empty FQDN is never written.
 set -euo pipefail
 
 if ! bashio::config.true 'tailscale_enabled'; then
@@ -16,38 +24,66 @@ mkdir -p /data/tailscale /run/tailscale
 
 AUTHKEY="$(bashio::config 'tailscale_authkey')"
 HOSTNAME_TS="$(bashio::config 'tailscale_hostname')"
+SOCK=/run/tailscale/tailscaled.sock
+TS=(tailscale --socket="${SOCK}")
 
 tailscaled \
   --tun=userspace-networking \
   --state=/data/tailscale/tailscaled.state \
-  --socket=/run/tailscale/tailscaled.sock &
+  --socket="${SOCK}" &
 TSD=$!
+trap 'kill "${TSD}" 2>/dev/null || true' EXIT
+# A TERM/INT from s6 must still run the EXIT trap (and so stop tailscaled).
+trap 'exit 143' TERM INT
+
+fail() {
+  bashio::log.error "tailscale: $1"
+  # Backgrounded + wait, so a TERM from s6 interrupts the pause at once.
+  sleep 30 &
+  wait $! || true
+  exit 1
+}
 
 for _ in $(seq 1 30); do
-  [ -S /run/tailscale/tailscaled.sock ] && break
+  [ -S "${SOCK}" ] && break
   sleep 1
 done
+[ -S "${SOCK}" ] || fail "tailscaled did not create ${SOCK} within 30 s; restarting"
 
-tailscale --socket=/run/tailscale/tailscaled.sock up \
-  --authkey="${AUTHKEY}" \
-  --hostname="${HOSTNAME_TS}" \
-  --accept-dns=false \
-  --reset
+if ! "${TS[@]}" up \
+    --authkey="${AUTHKEY}" \
+    --hostname="${HOSTNAME_TS}" \
+    --accept-dns=false \
+    --reset; then
+  fail "'tailscale up' failed. Likely causes: the auth key was already used (create a REUSABLE key), has expired, or is not allowed to apply tag:garage. See the add-on Documentation, Troubleshooting."
+fi
 
+STATE=""
 for _ in $(seq 1 60); do
-  if tailscale --socket=/run/tailscale/tailscaled.sock status --json \
-      | jq -e '.BackendState=="Running"' >/dev/null; then
-    break
-  fi
+  STATE="$("${TS[@]}" status --json 2>/dev/null | jq -r '.BackendState // ""' || true)"
+  [ "${STATE}" = "Running" ] && break
   sleep 1
 done
 
-FQDN="$(tailscale --socket=/run/tailscale/tailscaled.sock status --json \
-  | jq -r '.Self.DNSName' | sed 's/\.$//')"
-echo "${FQDN}" > /data/tailscale/fqdn
+if [ "${STATE}" != "Running" ]; then
+  case "${STATE}" in
+    NeedsLogin) fail "node is in state NeedsLogin after 60 s: the auth key was already used or has expired. Create a new REUSABLE, PRE-AUTHORISED key tagged tag:garage." ;;
+    NeedsMachineAuth) fail "node is in state NeedsMachineAuth after 60 s: the auth key is not pre-authorised and device approval is on. Approve the device in the Tailscale admin console or use a PRE-AUTHORISED key." ;;
+    *) fail "node did not reach Running within 60 s (state: ${STATE:-unknown}). Check the auth key and the tailnet policy (tag:garage owner)." ;;
+  esac
+fi
+
+FQDN="$("${TS[@]}" status --json | jq -r '.Self.DNSName // ""' | sed 's/\.$//')"
+if [ -z "${FQDN}" ]; then
+  fail "node is Running but reports no DNS name. Enable MagicDNS and HTTPS certificates for the tailnet."
+fi
+printf '%s\n' "${FQDN}" > /data/tailscale/fqdn.tmp
+mv /data/tailscale/fqdn.tmp /data/tailscale/fqdn
 
 bashio::log.info "tailscale up as ${FQDN}"
 
-/usr/bin/garage-tailscale-publish
+if ! /usr/bin/garage-tailscale-publish; then
+  fail "could not publish port 443 through Tailscale Funnel. Likely causes: Funnel is not enabled for tag:garage in the tailnet policy (nodeAttrs funnel), or HTTPS certificates are off. See the add-on Documentation, Troubleshooting."
+fi
 
 wait "${TSD}"
