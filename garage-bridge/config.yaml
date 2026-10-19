@@ -12,10 +12,10 @@ map:
   - type: share
     read_only: false
 ports:
-  "8443/tcp": 8443
+  "8443/tcp": 443
   "9090/tcp": null
 ports_description:
-  "8443/tcp": "Fleet Telemetry receiver (mTLS) — forward external TCP 443 here"
+  "8443/tcp": "Fleet Telemetry receiver (mTLS). Host port 443 so IPv6 (no NAT) and an IPv4 forward of external 443 both work; the container listens on 8443."
   "9090/tcp": "fleet-telemetry Prometheus metrics (internal)"
 watchdog: "tcp://[HOST]:[PORT:9090]"
 options:

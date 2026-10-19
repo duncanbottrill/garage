@@ -10,7 +10,10 @@ vehicle-command key.
 Five s6-supervised services:
 
 - **tailscale**: joins your tailnet as its own node (userspace networking)
-  and serves the command proxy (4443) to the tailnet only. Without a
+  and serves the command proxy (4443) to the tailnet only. With a
+  `telemetry_hostname` it also serves the receiver (8443) to the tailnet
+  only, as the route for a relay host (see [Behind CGNAT?](#behind-cgnat)).
+  Without a
   `telemetry_hostname` it also publishes port 443 to the internet with
   Tailscale Funnel (the fallback; see [Public hostname](#public-hostname-required)).
 - **tlscert**: with `telemetry_hostname` set, issues the receiver's
@@ -18,8 +21,9 @@ Five s6-supervised services:
   daily and restarts the receiver when it is renewed. Without it, gets a
   Let's Encrypt certificate for `<hostname>.<tailnet>.ts.net` with
   `tailscale cert` instead.
-- **telemetry**: Tesla's `fleet-telemetry` receiver on port 8443, which the
-  router forwards external TCP 443 to, publishing every record to the local
+- **telemetry**: Tesla's `fleet-telemetry` receiver, listening on port 8443
+  inside the container and published on the Green's port 443 (the router
+  forwards external TCP 443 there), publishing every record to the local
   Mosquitto broker.
 - **proxy**: Tesla's `tesla-http-proxy` on `127.0.0.1:4443`, which signs
   Fleet API requests with your private key. Only the ingest talks to it.
@@ -61,8 +65,9 @@ You need all of these. Most failed first starts come from a missing one.
    it first. Otherwise the new node becomes `garage-bridge-1` and its
    FQDN changes with it (and, in the Funnel fallback, its certificate and
    telemetry hostname too).
-8. **A public telemetry hostname, its DNS record and a router
-   port-forward.** See the next section.
+8. **A public telemetry hostname, its DNS record and a route in from the
+   internet** (an IPv4 port-forward, IPv6, or a relay). See the next
+   section.
 
 ## Public hostname (required)
 
@@ -76,12 +81,18 @@ it, for example `telemetry.duncanbottrill.com`. A Tailscale
 1. **DNS.** At the DNS provider for `duncanbottrill.com`, add an `A` record
    for the chosen name pointing at the home's public IPv4 address. If the
    ISP changes that address, the record has to follow it (update it by hand
-   or use the provider's dynamic DNS).
+   or use the provider's dynamic DNS). Behind CGNAT this does not work; see
+   [Behind CGNAT?](#behind-cgnat) and [IPv6 route](#ipv6-route).
 2. **Router port-forward.** Give the Green a fixed LAN address (a DHCP
    reservation), then forward external TCP 443 to the Green's LAN address,
-   port 8443. On an eero: the eero app, Settings, Network settings,
+   port 443. On an eero: the eero app, Settings, Network settings,
    Reservations & port forwarding, pick the Green, Add a port forward,
-   external port 443, internal port 8443, TCP.
+   external port 443, internal port 443, TCP. The add-on publishes the
+   receiver on the Green's port 443 (the container itself listens on 8443).
+   If another add-on already uses port 443 on the Green, change the host
+   port in this add-on's Network section and forward external 443 to that
+   port instead; the IPv6 route then no longer works, because IPv6 has no
+   port translation.
 3. **The option.** Set `telemetry_hostname` to the chosen name and restart
    the add-on.
 
@@ -89,7 +100,11 @@ it, for example `telemetry.duncanbottrill.com`. A Tailscale
 CA. The add-on creates its own certificate authority on first start, in
 `/data/ca` (a P-256 key and a self-signed certificate, `CN=Garage Bridge CA`,
 valid for 10 years), and issues the receiver a 90-day certificate for
-`telemetry_hostname` from it. Tesla is told to trust that CA through the
+`telemetry_hostname` from it. The name is in the certificate's
+subjectAltName; the subject is just `O=Garage Bridge`, since a CN cannot
+hold a name longer than 64 characters. If a key file no longer matches its
+certificate, the add-on re-issues the leaf, or re-creates the CA (and then
+the leaf). Tesla is told to trust that CA through the
 `ca` field of the telemetry configuration, so the car accepts the
 certificate even though no browser would. The leaf renews itself when it
 has less than 30 days left (about every 60 days) and the receiver restarts
@@ -104,19 +119,97 @@ network (a phone hotspot will do):
 ```
 openssl s_client -connect telemetry.duncanbottrill.com:443 \
   -servername telemetry.duncanbottrill.com </dev/null 2>&1 \
-  | grep -E 'Acceptable client certificate|CN'
+  | grep -E 'Acceptable client certificate|subject=|issuer='
 ```
 
-A working setup prints `CN=telemetry.duncanbottrill.com`, the issuer
+A working setup prints the subject `O=Garage Bridge`, the issuer
 `CN=Garage Bridge CA`, and `Acceptable client certificate CA names`
 followed by Tesla's issuing CAs: the receiver is asking for the car's client
 certificate. A timeout means the DNS record or the port-forward is wrong.
+
+On a Mac, the `openssl` in `/usr/bin` is LibreSSL, which does not print
+the `Acceptable client certificate CA names` list. Use Homebrew's OpenSSL 3
+(`$(brew --prefix openssl)/bin/openssl s_client ...`), or take the
+`issuer=... Garage Bridge CA` line plus a completed handshake as proof.
 
 **The Funnel fallback.** With `telemetry_hostname` empty, the add-on
 behaves as 0.1.0 did: Funnel publishes 443 at
 `<tailscale_hostname>.<tailnet>.ts.net` with a Let's Encrypt certificate.
 The receiver is reachable that way, but Tesla does not accept that hostname
 for registration, so the car never streams.
+
+### Behind CGNAT?
+
+If the router's WAN (internet) address is in `100.64.0.0/10`
+(`100.64.0.0` to `100.127.255.255`), or differs from what an outside "what
+is my IP" page reports, the ISP puts the home behind carrier-grade NAT and
+an IPv4 port-forward can never be reached from the internet. Options:
+
+- **IPv6** (no NAT), if the ISP provides it: see [IPv6 route](#ipv6-route).
+- **A relay host** with a public IPv4 address (a small VPS) on the same
+  tailnet. In hostname mode the add-on serves the receiver to the tailnet
+  only (never Funnel) on `garage-bridge.<tailnet>.ts.net:8443`. The relay
+  forwards public TCP 443 to that address as raw TCP: SNI passthrough, NO
+  TLS termination, so the car still sees the private-CA certificate and
+  completes mTLS with the receiver. For example:
+
+  ```
+  socat TCP-LISTEN:443,fork,reuseaddr TCP:garage-bridge.<tailnet>.ts.net:8443
+  ```
+
+  or an nginx `stream` block (not `http`):
+
+  ```
+  stream {
+    server {
+      listen 443;
+      proxy_pass garage-bridge.<tailnet>.ts.net:8443;
+    }
+  }
+  ```
+
+  Point the `A` record at the relay's public address. The tailnet policy
+  must let the relay reach `tag:garage` on TCP 8443 (the default allow-all
+  policy does). The add-on logs `serving fleet-telemetry on tailnet TCP
+  8443` when the route is up.
+
+### IPv6 route
+
+IPv6 addresses are globally routable, so with IPv6 the internet reaches
+the Green directly on port 443, with no port translation and no CGNAT in
+the way.
+
+1. **Turn IPv6 on at the router.** On an eero: the eero app, Settings,
+   Network settings, IPv6.
+2. **Open TCP 443 to the Green.** IPv6 has no NAT, but the router's
+   firewall still blocks inbound connections. On an eero, open the port on
+   the Green's reservation (Reservations & port forwarding, the Green, TCP
+   443). Whether the eero applies that opening to the Green's IPv6 address
+   has not been verified here; check from outside (below).
+3. **Find the Green's global IPv6 address.** Home Assistant: Settings,
+   System, Network, the network adapter, IPv6. Use the address starting
+   with `2` (global), not `fe80:` (link-local) or `fd` (local only).
+4. **DNS.** Add an `AAAA` record for the telemetry hostname (the same name
+   as the `A` record) pointing at that address. If the A route does not
+   work (CGNAT with no relay), leave the `A` record out, so that clients
+   do not try a dead IPv4 address first.
+5. **Check it** from an outside machine with IPv6:
+   `openssl s_client -6 -connect <telemetry hostname>:443 -servername <telemetry hostname> </dev/null`.
+
+Caveats: the car has to reach IPv6 over its cellular link, and that is
+not verified; if it cannot, only the IPv4 or relay route works for it. If
+the ISP rotates the home's IPv6 prefix, the Green's address changes and
+the `AAAA` record has to be updated.
+
+Inside the add-on, fleet-telemetry is configured for `0.0.0.0:8443`, but
+Go listens dual-stack on `[::]:8443` for that address. Tested locally
+(Docker 29 in Colima, not on Home Assistant OS itself), Docker forwards an
+IPv6 connection to the published host port 443 into the container in both
+network setups: on an IPv4-only container network `docker-proxy` listens
+on `[::]:443` and forwards to the container's IPv4 address, and on an
+IPv6-enabled network an `ip6tables` DNAT rule sends it to the container's
+IPv6 address on 8443. Both completed the TLS handshake with the
+private-CA certificate.
 
 ## Installing
 
@@ -190,9 +283,11 @@ interleave):
    and `telemetry: starting fleet-telemetry on 0.0.0.0:8443`.
 3. `tailscale up as garage-bridge.<tailnet>.ts.net`, then `tailscale:
    telemetry_hostname is set; not publishing 443 through Funnel (telemetry
-   arrives via the router port-forward), serving only 4443 to the
-   tailnet`, then the `funnel status` and `serve status` output, which
-   should list only TCP 4443. A Tailscale problem does not hold up the
+   arrives via the router port-forward or a relay), serving 4443 and 8443
+   to the tailnet only`, `tailscale: serving fleet-telemetry on tailnet TCP
+   8443 (tailnet only, for a relay host behind CGNAT; not Funnel)`, then
+   the `funnel status` and `serve status` output: serve lists TCP 4443 and
+   8443, Funnel lists nothing. A Tailscale problem does not hold up the
    receiver or the registration.
 4. `proxy: starting tesla-http-proxy on 127.0.0.1:4443`.
 5. Ingest JSON lines: `"msg":"ingest starting"`,
@@ -224,14 +319,21 @@ ingest does not log individual signals at `info`.
   partner account`**: `telemetry_hostname` is empty (the Funnel fallback)
   or not under `duncanbottrill.com`. Set it as described in Public
   hostname.
-- **`tlscert: telemetry_hostname '...' is not a valid DNS name`**: fix the
-  option (letters, digits, hyphens and dots only) and restart.
+- **`tlscert: telemetry_hostname '...' is not a valid hostname`** or
+  **`... is not a valid DNS name`**, with the ingest logging `ingest fatal`
+  and restarting: fix the option (letters, digits, hyphens and dots only,
+  no spaces inside the name; spaces at the ends and upper case are fine)
+  and restart.
 - **`"msg":"telemetry config skipped: private CA not ready yet"`** for more
   than a minute: tlscert has not written the certificate. Look for a
   `tlscert:` error further up the log.
 - **The car never connects although the configuration is synced**: run the
   outside check in Public hostname. A timeout is the DNS record or the
-  port-forward (external 443 to the Green's port 8443).
+  port-forward (external 443 to the Green's port 443), or the home is behind
+  CGNAT (see Behind CGNAT?).
+- **`tailscale: could not serve TCP 8443 to the tailnet`**: only the relay
+  route is affected; the router port-forward and IPv6 still work. Check
+  the `serve status` output.
 - **`tailscale: 'tailscale up' failed` or `node is in state NeedsLogin`**:
   the auth key was already used (it was not reusable), has expired, or may
   not apply `tag:garage`. Create a new reusable, pre-authorised key with the
@@ -239,9 +341,13 @@ ingest does not log individual signals at `info`.
 - **`node is in state NeedsMachineAuth`**: the key is not pre-authorised
   and device approval is on. Approve the machine in the admin console, or
   use a pre-authorised key.
-- **`could not publish port 443 through Tailscale Funnel`**: Funnel is not
-  granted to `tag:garage` (the `nodeAttrs` entry in step 1), or HTTPS
-  certificates are off.
+- **`could not publish port 443 through Tailscale Funnel`** (Funnel
+  fallback only): Funnel is not granted to `tag:garage` (the `nodeAttrs`
+  entry in step 1), or HTTPS certificates are off.
+- **`could not publish the proxy port 4443 on the tailnet`** (hostname
+  mode): `tailscale serve` failed; read the serve output just above it in
+  the log, and check that the node is up and the tailnet policy allows
+  `tag:garage`.
 - **`tlscert: tailscale cert failed; retrying in 10 minutes`**: HTTPS
   certificates are not enabled for the tailnet, or Let's Encrypt is rate
   limiting this name. Enable them and wait for the retry.
@@ -264,9 +370,12 @@ ingest does not log individual signals at `info`.
 
 ## Ports
 
-`8443/tcp` is the telemetry receiver (mTLS), mapped to the Green's port
-8443. The router forwards external TCP 443 to it. In the Funnel fallback it
-is also reached through Tailscale.
+`8443/tcp` is the telemetry receiver (mTLS). The container listens on 8443
+and Home Assistant maps it to the Green's port 443, so an IPv4 forward of
+external TCP 443 and a direct IPv6 connection both arrive on 443. Change
+the host port in the add-on's Network section if 443 is taken. In hostname
+mode it is also served to the tailnet on 8443 (for a relay); in the Funnel
+fallback it is reached through Funnel on 443.
 
 `9090/tcp` serves `fleet-telemetry`'s Prometheus metrics inside the
 container and is the add-on's watchdog check; it is not mapped to the host.
