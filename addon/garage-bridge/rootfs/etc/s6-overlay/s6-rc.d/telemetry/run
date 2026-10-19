@@ -1,0 +1,4 @@
+#!/command/with-contenv bashio
+# placeholder until the real service lands in a later task
+bashio::log.info "telemetry: placeholder"
+exec sleep infinity

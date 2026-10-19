@@ -1,0 +1,16 @@
+{
+  "tailscale_enabled": true,
+  "tailscale_authkey": "",
+  "tailscale_hostname": "garage-bridge",
+  "tesla_private_key": "",
+  "tesla_vin": "",
+  "garage_api_base": "https://garage.duncanbottrill.com",
+  "bridge_secret": "",
+  "supabase_url": "",
+  "supabase_service_key": "",
+  "mqtt_host": "core-mosquitto",
+  "mqtt_port": 1883,
+  "mqtt_username": "",
+  "mqtt_password": "",
+  "log_level": "info"
+}
