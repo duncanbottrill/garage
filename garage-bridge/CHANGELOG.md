@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.0
+
+Fixes Tesla rejecting the telemetry configuration with `hostname domain
+does not match with partner account`: the receiver now runs under a
+hostname in the partner domain instead of the Tailscale `*.ts.net` name.
+
+- New option `telemetry_hostname` (e.g. `telemetry.duncanbottrill.com`).
+  When set, the add-on creates its own private CA in `/data/ca` (P-256,
+  10 years) and serves fleet-telemetry with a 90-day certificate for that
+  name, renewed when under 30 days remain. Tesla trusts it through the
+  configuration's `ca` field, so no public certificate is needed.
+- Port 8443/tcp is mapped to the host; forward external TCP 443 to it on
+  the router. In hostname mode the 443 Tailscale Funnel is no longer
+  published (an earlier mapping is cleared); the tailnet-only 4443 serve
+  for the proxy stays.
+- The ingest registers `telemetry_hostname` with the private CA and no
+  longer waits for Tailscale in that mode. A registration attempt that
+  was skipped because the certificate was not ready yet, or that failed
+  with an error, is retried after 30 seconds instead of at the next
+  5-minute poll.
+- With `telemetry_hostname` empty everything behaves as in 0.1.0 (the
+  Funnel fallback, which Tesla does not accept for registration).
+
 ## 0.1.0
 
 First working release of the Garage Bridge add-on.

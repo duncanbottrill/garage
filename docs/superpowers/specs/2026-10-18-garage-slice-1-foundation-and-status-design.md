@@ -114,6 +114,8 @@ A "Refresh now" action in More (not on Status) makes one `vehicle_data` request 
 
 **Amended 2026-10-19 (Plan 1B as built).** §5.1–5.3 below described three separate add-ons (Tailscale, Tesla HTTP Proxy, Garage Bridge). Plan 1B shipped one add-on instead — **Garage Bridge** — running `tailscaled`, Tesla's `tesla-http-proxy`, Tesla's `fleet-telemetry` and the ingest worker as four s6-supervised services in a single container. §5.1–5.8 below replace the three-add-on design with what actually shipped.
 
+**Amended 2026-10-19 (Plan 1B Task 9, add-on 0.2.0).** Tesla rejects a telemetry config whose hostname is not under the partner account's root domain (`hostname domain does not match with partner account`), so the tailnet `*.ts.net` name cannot be registered. The receiver now runs under a hostname in the partner domain (option `telemetry_hostname`, e.g. `telemetry.duncanbottrill.com`), reached through a DNS `A` record and a router port-forward (external TCP 443 → the Green's 8443). Its certificate comes from a private CA the add-on keeps in `/data/ca` (P-256, 10 years; 90-day leaf renewed inside 30 days), which the config's `ca` field tells the car to trust, so no public certificate is needed. In that mode `tlscert` does not wait for Tailscale, the 443 Funnel is not published, and the config `hostname` is `telemetry_hostname`; Tailscale stays only for the tailnet-only 4443 proxy serve. The Funnel + `tailscale cert` path described below is kept as the fallback when `telemetry_hostname` is empty and is documented for reference only: Tesla does not accept it for registration.
+
 ### 5.1 Processes (`garage-bridge/`, repo root)
 
 Custom add-on repository `duncanbottrill/garage` (`repository.yaml` and `garage-bridge/config.yaml` at the repo root, as Home Assistant requires), architecture `aarch64` (and `amd64` for local dev), image built by GitHub Actions and pushed to GHCR; HA pulls the image (never builds it — both GHCR packages must be public, since the Green has no registry credentials).
@@ -146,6 +148,7 @@ All secrets arrive through HA add-on options (encrypted at rest on the Green); n
 | `tailscale_enabled` | bool | yes | `true` |
 | `tailscale_authkey` | password | when `tailscale_enabled` | — |
 | `tailscale_hostname` | string | yes | `garage-bridge` |
+| `telemetry_hostname` | string | no (needed for Tesla to accept the config) | — |
 | `tesla_private_key` | password | when `tailscale_enabled` | — |
 | `tesla_vin` | string | yes | — |
 | `garage_api_base` | url | yes | `https://garage.duncanbottrill.com` |
