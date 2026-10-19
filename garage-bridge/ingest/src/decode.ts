@@ -127,8 +127,9 @@ function errorFromPayload(value: unknown, receivedAt: Date): { body: string; at:
 /**
  * The single topic-parse + payload-decode path shared by the MQTT source and
  * its tests: splits `topic` under `base`, decodes `raw`, and maps the result
- * onto a `BridgeEvent`. Returns null for topics outside `base` or an
- * unrecognized section/missing name segment. Never throws on a malformed
+ * onto a `BridgeEvent`. Returns null for topics outside `base`, an
+ * unrecognized section/missing name segment, or an alert topic other than
+ * `alerts/<name>/current`. Never throws on a malformed
  * payload — unrecognized shapes fall back to "UNKNOWN" status / inactive
  * alerts / stringified error bodies, with `at` from the payload's own
  * timestamp field when parseable, else `receivedAt`.
@@ -154,8 +155,12 @@ export function toBridgeEvent(
     case "connectivity":
       return { kind: "connectivity", vin, status: connectivityStatus(value), at: atFromField(value, "CreatedAt", receivedAt) };
     case "alerts": {
+      // fleet-telemetry publishes each alert on `alerts/<name>/current` (the
+      // live state) and `alerts/<name>/history` (an array of past alerts).
+      // Only `current` reflects whether the alert is active now; a history
+      // array would otherwise decode as `active: false` and clear it.
       const name = rest[0];
-      if (!name) return null;
+      if (!name || rest[1] !== "current") return null;
       const { active, at } = alertFromPayload(value, receivedAt);
       return { kind: "alert", vin, name, active, at };
     }

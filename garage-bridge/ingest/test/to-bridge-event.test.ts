@@ -74,6 +74,17 @@ describe("toBridgeEvent", () => {
     expect(ev).toEqual({ kind: "connectivity", vin: VIN, status: "CONNECTED", at: RECEIVED_AT });
   });
 
+  it("ignores alerts/<name>/history: a history array must never clear an active alert", () => {
+    const history = JSON.stringify([
+      { Name: "Service_Required", StartedAt: "2026-10-18T07:00:00Z", EndedAt: "2026-10-18T08:00:00Z", Audiences: ["Service"] },
+    ]);
+    expect(toBridgeEvent(`garage/${VIN}/alerts/Service_Required/history`, history, BASE, RECEIVED_AT)).toBeNull();
+  });
+
+  it("ignores an alerts topic with no current/history segment", () => {
+    expect(toBridgeEvent(`garage/${VIN}/alerts/Service_Required`, "true", BASE, RECEIVED_AT)).toBeNull();
+  });
+
   it("returns null for a topic outside base", () => {
     expect(toBridgeEvent(`other-base/${VIN}/v/Soc`, "1", BASE, RECEIVED_AT)).toBeNull();
   });
