@@ -27,6 +27,11 @@ const BUDGET_POLL_MS = 5 * 60_000;
 // ready yet) or threw, so a first boot registers within seconds of the TLS
 // material appearing rather than at the next 5-minute budget poll.
 const TELEMETRY_RETRY_MS = 30_000;
+// Consecutive fast retries allowed after attempts that THREW (e.g. the
+// bridge-token endpoint unreachable); after that the 5-minute budget poll
+// takes over until an attempt returns without throwing. Not-ready skips are
+// not capped.
+const TELEMETRY_MAX_THROW_RETRIES = 5;
 const FORCE_FLUSH_AHEAD_MS = 2_500; // > Batcher's default maxAgeMs, well under maxBufferMs
 const MAX_PATCH_ATTEMPTS = 3; // consecutive mergeState failures before a pending patch is dropped
 
@@ -101,6 +106,8 @@ export interface TelemetryEnsurerDeps {
   log: Logger;
   isStopping: () => boolean;
   retryMs?: number;
+  /** Cap on consecutive fast retries after thrown attempts (default 5). */
+  maxThrowRetries?: number;
 }
 
 export interface TelemetryEnsurer {
@@ -124,27 +131,37 @@ export interface TelemetryEnsurer {
  * (every run clears the pending one first), none is scheduled once the config
  * has been confirmed (`changed: true` or `current`) or while stopping, and
  * results the manager already backs off on itself (post_failed, poll_backoff,
- * token_error, ...) are left to that schedule.
+ * token_error, ...) are left to that schedule. Fast retries after a thrown
+ * attempt are capped at `maxThrowRetries` (default 5) in a row; after that
+ * only the budget poll retries, until an attempt returns without throwing
+ * (a not-ready skip counts), which resets the count. Not-ready skips keep
+ * retrying every `retryMs` without a cap.
  */
 export function createTelemetryEnsurer(deps: TelemetryEnsurerDeps): TelemetryEnsurer {
   const retryMs = deps.retryMs ?? TELEMETRY_RETRY_MS;
+  const maxThrowRetries = deps.maxThrowRetries ?? TELEMETRY_MAX_THROW_RETRIES;
   const { log } = deps;
   let retryTimer: NodeJS.Timeout | null = null;
   let confirmed = false;
   let lastMode: BudgetMode = "normal";
+  // Fast retries already scheduled for the current run of thrown attempts.
+  let throwRetries = 0;
 
   function clearRetry(): void {
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
   }
 
-  function scheduleRetry(): void {
-    if (confirmed || retryTimer || deps.isStopping()) return;
+  /** Returns whether a retry is now pending. */
+  function scheduleRetry(): boolean {
+    if (retryTimer) return true;
+    if (confirmed || deps.isStopping()) return false;
     retryTimer = setTimeout(() => {
       retryTimer = null;
       if (deps.isStopping()) return;
       void attempt(lastMode, true);
     }, retryMs);
+    return true;
   }
 
   function logEnsureResult(result: EnsureResult): void {
@@ -195,11 +212,13 @@ export function createTelemetryEnsurer(deps: TelemetryEnsurerDeps): TelemetryEns
 
     const ctx = readContext(fromRetry ? "debug" : "warning");
     if (!ctx) {
+      throwRetries = 0;
       scheduleRetry();
       return;
     }
     try {
       const result = await deps.manager.ensure(mode, ctx);
+      throwRetries = 0;
       logEnsureResult(result);
       if (result.changed || result.reason === "current") {
         confirmed = true;
@@ -211,7 +230,14 @@ export function createTelemetryEnsurer(deps: TelemetryEnsurerDeps): TelemetryEns
       }
     } catch (err) {
       log("error", "telemetry config ensure failed", { error: errMsg(err) });
-      scheduleRetry();
+      if (throwRetries < maxThrowRetries) {
+        if (scheduleRetry()) throwRetries++;
+      } else if (throwRetries === maxThrowRetries) {
+        throwRetries++; // log the hand-over once per run of failures
+        log("warning", "telemetry config ensure keeps failing; next attempt at the budget poll", {
+          fast_retries: maxThrowRetries,
+        });
+      }
     }
   }
 

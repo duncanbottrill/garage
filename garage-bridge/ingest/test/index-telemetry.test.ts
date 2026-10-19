@@ -144,6 +144,79 @@ describe("createTelemetryEnsurer", () => {
       expect(ensure).toHaveBeenCalledTimes(2);
     });
 
+    it("stops fast-retrying after 5 consecutive thrown retries and leaves it to the budget poll", async () => {
+      const { ensurer, ensure, calls } = setup({
+        ensure: async () => {
+          throw new Error("fetch failed");
+        },
+      });
+      await ensurer.run("normal");
+      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(30_000);
+      // The scheduled attempt plus 5 fast retries, then nothing until the next poll.
+      expect(ensure).toHaveBeenCalledTimes(6);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(
+        calls.filter(([level, msg]) => level === "warning" && msg === "telemetry config ensure keeps failing; next attempt at the budget poll"),
+      ).toHaveLength(1);
+
+      // A budget poll that throws again does not restart the fast retries.
+      await ensurer.run("normal");
+      expect(ensure).toHaveBeenCalledTimes(7);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("resets the thrown-retry budget after a non-throwing attempt", async () => {
+      let throwing = true;
+      const { ensurer, ensure } = setup({
+        ensure: async (): Promise<EnsureResult> => {
+          if (throwing) throw new Error("fetch failed");
+          return { changed: false, reason: "post_failed" };
+        },
+      });
+      await ensurer.run("normal");
+      for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(30_000);
+      expect(ensure).toHaveBeenCalledTimes(6);
+
+      throwing = false;
+      await ensurer.run("normal"); // returns (post_failed): counter reset, no fast retry
+      expect(ensure).toHaveBeenCalledTimes(7);
+      expect(vi.getTimerCount()).toBe(0);
+
+      throwing = true;
+      await ensurer.run("normal");
+      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(30_000);
+      expect(ensure).toHaveBeenCalledTimes(7 + 6);
+    });
+
+    it("resets the thrown-retry budget after a not-ready skip", async () => {
+      let ready = true;
+      const { ensurer, ensure } = setup({
+        caPem: () => (ready ? CA : null),
+        ensure: async () => {
+          throw new Error("fetch failed");
+        },
+      });
+      await ensurer.run("normal");
+      for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(30_000);
+      expect(ensure).toHaveBeenCalledTimes(6);
+      expect(vi.getTimerCount()).toBe(0);
+
+      ready = false;
+      await ensurer.run("normal"); // skip: counter reset, 30 s retry scheduled
+      expect(vi.getTimerCount()).toBe(1);
+      ready = true;
+      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(30_000);
+      expect(ensure).toHaveBeenCalledTimes(6 + 6);
+    });
+
+    it("keeps retrying not-ready skips every 30 s with no cap", async () => {
+      const { ensurer, readCaPem } = setup({ telemetryHostname: HOST, caPem: () => null });
+      await ensurer.run("normal");
+      for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(30_000);
+      expect(readCaPem).toHaveBeenCalledTimes(21);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
     it("keeps retrying every 30 s while still not ready, one timer at a time", async () => {
       const { ensurer, readCaPem } = setup({ telemetryHostname: HOST, caPem: () => null });
       await ensurer.run("normal");
