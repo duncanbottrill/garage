@@ -52,9 +52,11 @@ jobs:
 
       - name: shellcheck
         # The s6-overlay run/finish scripts use `#!/command/with-contenv
-        # bashio`, a shebang shellcheck doesn't recognize, so force bash.
+        # bashio`, a shebang shellcheck does not recognize, so force bash.
+        # SC2317 (unreachable) is a false positive for trap-invoked cleanup
+        # functions on the shellcheck shipped with ubuntu-latest.
         run: |
-          shellcheck -s bash \
+          shellcheck -s bash -e SC2317 \
             garage-bridge/rootfs/etc/s6-overlay/s6-rc.d/*/run \
             garage-bridge/rootfs/etc/s6-overlay/s6-rc.d/*/finish \
             garage-bridge/rootfs/usr/bin/* \
