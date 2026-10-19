@@ -1,0 +1,50 @@
+#!/bin/bash
+# Reads a PEM private key on stdin and writes it to stdout with its line
+# breaks restored. Home Assistant renders `password` options as a single-line
+# input, so a key pasted there arrives as one line (newlines dropped or
+# turned into spaces), which tesla-http-proxy cannot load. When the BEGIN
+# marker is not on a line of its own, the base64 body between the
+# `-----BEGIN ...PRIVATE KEY-----` / `-----END ...-----` markers is stripped
+# of whitespace, folded at 64 characters and re-wrapped in its header and
+# footer. A PEM that is already multi-line passes through unchanged (apart
+# from CR removal). Exits 1 without output when no private-key block is
+# found. Never prints the key to stderr.
+set -euo pipefail
+
+pem="$(cat)"
+pem="${pem//$'\r'/}"
+
+re='-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----'
+if [[ ! "${pem}" =~ ${re} ]]; then
+  echo "garage-normalize-pem: no -----BEGIN ... PRIVATE KEY----- marker found" >&2
+  exit 1
+fi
+label="${BASH_REMATCH[1]}"
+header="-----BEGIN ${label}-----"
+footer="-----END ${label}-----"
+
+# Already multi-line: the header ends its own line. Leave it alone.
+if [[ "${pem}" == *"${header}"$'\n'* ]]; then
+  printf '%s\n' "${pem}"
+  exit 0
+fi
+
+if [[ "${pem}" != *"${footer}"* ]]; then
+  echo "garage-normalize-pem: ${header} has no matching ${footer}" >&2
+  exit 1
+fi
+
+body="${pem#*"${header}"}"
+body="${body%%"${footer}"*}"
+body="${body//[[:space:]]/}"
+if [ -z "${body}" ]; then
+  echo "garage-normalize-pem: empty key body" >&2
+  exit 1
+fi
+
+printf '%s\n' "${header}"
+while [ -n "${body}" ]; do
+  printf '%s\n' "${body:0:64}"
+  body="${body:64}"
+done
+printf '%s\n' "${footer}"

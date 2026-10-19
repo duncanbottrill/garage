@@ -1,6 +1,6 @@
 #!/command/with-contenv bashio
 # Writes the Tesla vehicle-command private key to /data/private-key.pem
-# (600) and runs tesla-http-proxy on 127.0.0.1:4443 for the ingest
+# (600, line breaks restored and validated with openssl) and runs tesla-http-proxy on 127.0.0.1:4443 for the ingest
 # telemetry-config manager to talk to. tesla_private_key is optional in
 # dev/e2e: when it's empty there is nothing to sign commands with, so we
 # log a clear message and idle rather than crash-looping — the rest of
@@ -25,8 +25,19 @@ if [ -z "${PRIVATE_KEY}" ]; then
   exec sleep infinity
 fi
 
+# Home Assistant shows `password` options as a single-line field, so a key
+# pasted there loses its line breaks; garage-normalize-pem refolds it into
+# a loadable PEM. Validate before handing it to the proxy: a bad key would
+# otherwise make tesla-http-proxy exit and s6 restart it every second.
+# Never log the key itself.
 umask 0177
-printf '%s\n' "${PRIVATE_KEY}" > /data/private-key.pem
+if ! printf '%s\n' "${PRIVATE_KEY}" | /usr/bin/garage-normalize-pem > /data/private-key.pem.tmp \
+    || ! openssl pkey -in /data/private-key.pem.tmp -noout >/dev/null 2>&1; then
+  rm -f /data/private-key.pem.tmp
+  bashio::log.error "proxy: tesla_private_key is not a valid PEM private key. Paste the whole file, including the -----BEGIN/END----- lines; in the YAML editor use the block form 'tesla_private_key: |' with the key indented on the following lines (see the add-on Documentation). Idling until the option is fixed."
+  exec sleep infinity
+fi
+mv /data/private-key.pem.tmp /data/private-key.pem
 chmod 600 /data/private-key.pem
 
 mkdir -p /data/proxy-tls
