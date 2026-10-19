@@ -10,3 +10,4 @@ supabase/.temp
 .DS_Store
 .superpowers/
 *.tsbuildinfo
+dev/tls/

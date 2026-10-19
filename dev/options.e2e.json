@@ -1,0 +1,16 @@
+{
+  "tailscale_enabled": false,
+  "tailscale_authkey": "",
+  "tailscale_hostname": "garage-bridge-e2e",
+  "tesla_private_key": "",
+  "tesla_vin": "XP7YE2E000000001",
+  "garage_api_base": "https://garage.duncanbottrill.com",
+  "bridge_secret": "task5-e2e-bridge-secret",
+  "supabase_url": "http://host.lima.internal:54321",
+  "supabase_service_key": "__SERVICE_KEY__",
+  "mqtt_host": "host.lima.internal",
+  "mqtt_port": 1883,
+  "mqtt_username": "",
+  "mqtt_password": "",
+  "log_level": "debug"
+}

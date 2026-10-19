@@ -1,0 +1,14 @@
+# This is the build context ignore file for the garage-bridge add-on image
+# (built with context = repo root, -f garage-bridge/Dockerfile). The `**/`
+# prefix matters: a bare `node_modules` only matches at the context root,
+# so nested copies (e.g. the Mac's garage-bridge/ingest/node_modules with
+# darwin binaries) would otherwise be sent and COPY'd into the build.
+**/node_modules
+**/.next
+**/dist
+.superpowers
+.git
+supabase/.temp
+**/.env
+**/.env.*
+**/.env.local

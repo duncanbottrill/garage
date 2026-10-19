@@ -1,0 +1,9 @@
+{
+  "name": "garage-bridge-e2e-replay",
+  "private": true,
+  "type": "module",
+  "description": "Standalone MQTT replay used only by dev/e2e-bridge.sh — not part of the add-on build.",
+  "dependencies": {
+    "mqtt": "^5.10.1"
+  }
+}

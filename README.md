@@ -6,7 +6,8 @@ Garage is a Tessie-class companion app for one Tesla (iPhone and Mac), built dir
 
 ```
 garage/
-  addon/                 HA add-on repository (repository.yaml, garage-bridge/)
+  repository.yaml        HA add-on repository descriptor (repo root, as HA requires)
+  garage-bridge/          Garage Bridge HA add-on
   apps/web/              Next.js on Vercel (garage domain)
   apps/apple/            Xcode project + GarageKit package
   packages/tokens/       tokens.json → Swift + CSS generators

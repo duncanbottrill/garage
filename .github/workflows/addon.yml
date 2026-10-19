@@ -1,0 +1,134 @@
+name: Garage Bridge add-on
+
+on:
+  push:
+    # No `paths` filter: a tag push carries no commit diff, so a paths filter
+    # could silently skip the release build. The test job is cheap enough to
+    # run on every push to main.
+    branches: [main]
+    tags:
+      - "bridge-v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test ingest + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: npm ci (ingest)
+        working-directory: garage-bridge/ingest
+        run: npm ci --no-audit --no-fund
+
+      - name: npm test (ingest)
+        # No SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY here: the Supabase-backed
+        # sink tests (test/supabase-sink.test.ts) skip themselves via
+        # describe.skipIf when that env is absent, so this only runs the
+        # tests that don't need a live Supabase.
+        working-directory: garage-bridge/ingest
+        run: npm test
+
+      - name: npm run typecheck (ingest)
+        working-directory: garage-bridge/ingest
+        run: npm run typecheck
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: shellcheck
+        # The s6-overlay run/finish scripts use `#!/command/with-contenv
+        # bashio`, a shebang shellcheck doesn't recognize, so force bash.
+        run: |
+          shellcheck -s bash \
+            garage-bridge/rootfs/etc/s6-overlay/s6-rc.d/*/run \
+            garage-bridge/rootfs/etc/s6-overlay/s6-rc.d/*/finish \
+            garage-bridge/rootfs/usr/bin/* \
+            dev/*.sh
+
+  build:
+    name: Build + push (${{ matrix.arch }})
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            platform: linux/arm64
+            base: ghcr.io/home-assistant/aarch64-base-debian:bookworm
+          - arch: amd64
+            platform: linux/amd64
+            base: ghcr.io/home-assistant/amd64-base-debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read add-on version and compute tags
+        id: version
+        # Home Assistant pulls the image by the config.yaml version, so that
+        # tag must only ever be pushed from a release tag: a branch push
+        # re-pushing :<version> would hand a reinstall unreleased code.
+        #   branch push / dispatch -> :edge and :sha-<short7> only
+        #   bridge-v<version> tag  -> :<version> and :latest, and the tag must
+        #                             match the config.yaml version exactly
+        run: |
+          VERSION="$(grep -E '^version:' garage-bridge/config.yaml | sed -E 's/version: *"?([^"]*)"?/\1/')"
+          if [ -z "${VERSION}" ]; then
+            echo "could not read version from garage-bridge/config.yaml" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+          IMAGE="ghcr.io/duncanbottrill/garage-bridge-${{ matrix.arch }}"
+          if [[ "${GITHUB_REF}" == refs/tags/bridge-v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#bridge-v}"
+            if [ "${TAG_VERSION}" != "${VERSION}" ]; then
+              echo "tag ${GITHUB_REF_NAME} does not match garage-bridge/config.yaml version ${VERSION}" >&2
+              exit 1
+            fi
+            TAGS="${IMAGE}:${VERSION}"$'\n'"${IMAGE}:latest"
+          else
+            TAGS="${IMAGE}:edge"$'\n'"${IMAGE}:sha-${GITHUB_SHA::7}"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "${TAGS}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: garage-bridge/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            BUILD_FROM=${{ matrix.base }}
+            BUILD_ARCH=${{ matrix.arch }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.version.outputs.tags }}
+          cache-from: type=gha,scope=garage-bridge-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=garage-bridge-${{ matrix.arch }}

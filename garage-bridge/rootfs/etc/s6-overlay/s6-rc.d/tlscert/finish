@@ -1,0 +1,2 @@
+#!/command/with-contenv bashio
+bashio::log.warning "tlscert exited with code ${1}"

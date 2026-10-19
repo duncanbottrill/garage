@@ -1,0 +1,94 @@
+#!/command/with-contenv bashio
+# Fetches/renews the Let's Encrypt cert for this node's Tailscale FQDN via
+# `tailscale cert`, then builds /data/tls/ca.pem (the intermediate chain,
+# with the ISRG Root X1 baked at build time appended if it isn't already
+# part of the chain `tailscale cert` returned). Loops forever, re-checking
+# every 24h; idempotent since `tailscale cert` just re-issues/reuses the
+# same cert for the same FQDN.
+#
+# fleet-telemetry reads its TLS pair once at startup, so when the leaf
+# certificate changes (a Let's Encrypt renewal) the telemetry service is
+# restarted to pick it up; otherwise it would keep serving the old cert
+# until it expired. All files are written to a temp path and moved into
+# place, so a reader never sees a half-written cert, key or chain.
+set -euo pipefail
+
+if ! bashio::config.true 'tailscale_enabled'; then
+  bashio::log.warning "tlscert: tailscale disabled, expecting /data/tls to be provided"
+  exec sleep infinity
+fi
+
+TS=(tailscale --socket=/run/tailscale/tailscaled.sock)
+FQDN_FILE=/data/tailscale/fqdn
+TLS_DIR=/data/tls
+TELEMETRY_SERVICE=/run/service/telemetry
+mkdir -p "${TLS_DIR}"
+
+# SHA-256 fingerprint of the first certificate in $1, or "" if unreadable.
+leaf_fingerprint() {
+  [ -s "$1" ] || return 0
+  openssl x509 -noout -fingerprint -sha256 -in "$1" 2>/dev/null || true
+}
+
+# The tailscale service writes the FQDN once the node is Running; on first
+# boot that can take a while, so wait for it instead of crash-looping.
+waited=0
+while [ ! -s "${FQDN_FILE}" ]; do
+  if [ "$((waited % 30))" -eq 0 ]; then
+    bashio::log.info "tlscert: waiting for ${FQDN_FILE} (tailscale not up yet)"
+  fi
+  sleep 2
+  waited=$((waited + 2))
+done
+
+while true; do
+  FQDN="$(cat "${FQDN_FILE}")"
+
+  OLD_FP="$(leaf_fingerprint "${TLS_DIR}/server.crt")"
+  if "${TS[@]}" cert --cert-file "${TLS_DIR}/server.crt.tmp" --key-file "${TLS_DIR}/server.key.tmp" "${FQDN}"; then
+    chmod 600 "${TLS_DIR}/server.key.tmp"
+
+    # Chain without the leaf: everything after the first certificate block.
+    awk 'BEGIN{n=0} /BEGIN CERTIFICATE/{n++} n>=2{print}' "${TLS_DIR}/server.crt.tmp" > "${TLS_DIR}/ca.pem.tmp"
+
+    # Append the build-time-baked ISRG Root X1 unless the chain `tailscale
+    # cert` returned already ends in it. A plain PEM certificate is just
+    # base64 DER, so it never contains its own subject name as readable
+    # text (grepping for "ISRG Root X1" would never match and would
+    # append a duplicate root on every refresh) — compare the SHA-256
+    # fingerprint of the chain's last block against the baked root
+    # instead, so the root is appended exactly once.
+    if [ -f /usr/share/garage/isrgrootx1.pem ]; then
+      ISRG_FP="$(openssl x509 -noout -fingerprint -sha256 -in /usr/share/garage/isrgrootx1.pem 2>/dev/null || true)"
+      LAST_BLOCK="$(awk '/BEGIN CERTIFICATE/{n++} {blk[n]=blk[n] $0 ORS} END{print blk[n]}' "${TLS_DIR}/ca.pem.tmp")"
+      LAST_FP="$(printf '%s' "${LAST_BLOCK}" | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)"
+      if [ -z "${LAST_FP}" ] || [ "${LAST_FP}" != "${ISRG_FP}" ]; then
+        cat /usr/share/garage/isrgrootx1.pem >> "${TLS_DIR}/ca.pem.tmp"
+      fi
+    fi
+
+    NEW_FP="$(leaf_fingerprint "${TLS_DIR}/server.crt.tmp")"
+
+    # Key first, then cert: by the time the new cert is visible, its key is too.
+    mv "${TLS_DIR}/server.key.tmp" "${TLS_DIR}/server.key"
+    mv "${TLS_DIR}/server.crt.tmp" "${TLS_DIR}/server.crt"
+    mv "${TLS_DIR}/ca.pem.tmp" "${TLS_DIR}/ca.pem"
+    bashio::log.info "tlscert: certificate for ${FQDN} refreshed"
+
+    if [ -n "${OLD_FP}" ] && [ "${NEW_FP}" != "${OLD_FP}" ]; then
+      if [ -d "${TELEMETRY_SERVICE}" ]; then
+        bashio::log.info "tlscert: certificate changed (renewed); restarting fleet-telemetry to load it"
+        s6-svc -r "${TELEMETRY_SERVICE}" || bashio::log.error "tlscert: could not restart ${TELEMETRY_SERVICE}"
+      else
+        bashio::log.info "tlscert: certificate changed; telemetry service not up yet, it will load the new pair when it starts"
+      fi
+    fi
+  else
+    rm -f "${TLS_DIR}/server.crt.tmp" "${TLS_DIR}/server.key.tmp"
+    bashio::log.error "tlscert: tailscale cert failed; retrying in 10 minutes"
+    sleep 600
+    continue
+  fi
+
+  sleep 86400
+done

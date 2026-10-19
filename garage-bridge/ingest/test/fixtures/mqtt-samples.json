@@ -1,0 +1,23 @@
+[
+  { "id": "soc-plain", "topic": "garage/XP7YGCEL9PB123456/v/Soc", "payload": "72.5" },
+  { "id": "battery-double-wrapped", "topic": "garage/XP7YGCEL9PB123456/v/BatteryLevel", "payload": "{\"doubleValue\":72}" },
+  { "id": "gear-plain-string", "topic": "garage/XP7YGCEL9PB123456/v/Gear", "payload": "\"ShiftStateD\"" },
+  { "id": "gear-shiftstate-wrapped", "topic": "garage/XP7YGCEL9PB123456/v/Gear", "payload": "{\"shiftStateValue\":\"ShiftStateP\"}" },
+  { "id": "location-plain-object", "topic": "garage/XP7YGCEL9PB123456/v/Location", "payload": "{\"latitude\":54.41,\"longitude\":-1.72}" },
+  { "id": "location-wrapped", "topic": "garage/XP7YGCEL9PB123456/v/Location", "payload": "{\"locationValue\":{\"latitude\":54.41,\"longitude\":-1.72}}" },
+  { "id": "door-state", "topic": "garage/XP7YGCEL9PB123456/v/DoorState", "payload": "{\"DriverFront\":false,\"PassengerFront\":true,\"DriverRear\":false,\"PassengerRear\":false,\"TrunkFront\":false,\"TrunkRear\":false}" },
+  { "id": "locked-plain-bool", "topic": "garage/XP7YGCEL9PB123456/v/Locked", "payload": "true" },
+  { "id": "window-plain-string", "topic": "garage/XP7YGCEL9PB123456/v/FpWindow", "payload": "\"WindowStatePartiallyOpen\"" },
+  { "id": "tpms-fl-plain", "topic": "garage/XP7YGCEL9PB123456/v/TpmsPressureFl", "payload": "2.9" },
+  { "id": "speed-invalid-string", "topic": "garage/XP7YGCEL9PB123456/v/VehicleSpeed", "payload": "\"invalid\"" },
+  { "id": "sentry-plain-string", "topic": "garage/XP7YGCEL9PB123456/v/SentryMode", "payload": "\"SentryModeStateArmed\"" },
+  { "id": "charge-amps-int-wrapped", "topic": "garage/XP7YGCEL9PB123456/v/ChargeAmps", "payload": "{\"intValue\":32}" },
+  { "id": "charge-port-bool-wrapped", "topic": "garage/XP7YGCEL9PB123456/v/ChargePortDoorOpen", "payload": "{\"booleanValue\":true}" },
+  { "id": "generic-invalid-object", "topic": "garage/XP7YGCEL9PB123456/v/SomeOtherField", "payload": "{\"invalid\":true}" },
+  { "id": "connectivity-connected", "topic": "garage/XP7YGCEL9PB123456/connectivity", "payload": "{\"ConnectionId\":\"abc\",\"Status\":\"CONNECTED\",\"CreatedAt\":\"2026-10-19T08:00:00Z\"}" },
+  { "id": "connectivity-disconnected", "topic": "garage/XP7YGCEL9PB123456/connectivity", "payload": "{\"ConnectionId\":\"def\",\"Status\":\"DISCONNECTED\",\"CreatedAt\":\"2026-10-19T08:05:00Z\"}" },
+  { "id": "alert-service-required", "topic": "garage/XP7YGCEL9PB123456/alerts/Service_Required/current", "payload": "{\"Name\":\"Service_Required\",\"StartedAt\":\"2026-10-19T07:00:00Z\",\"EndedAt\":null,\"Audiences\":[\"Service\"]}" },
+  { "id": "alert-service-required-cleared", "topic": "garage/XP7YGCEL9PB123456/alerts/Service_Required/current", "payload": "{\"Name\":\"Service_Required\",\"StartedAt\":\"2026-10-19T07:00:00Z\",\"EndedAt\":\"2026-10-19T07:45:00Z\",\"Audiences\":[\"Service\"]}" },
+  { "id": "error-some-error", "topic": "garage/XP7YGCEL9PB123456/errors/SomeError", "payload": "{\"Name\":\"SomeError\",\"Body\":\"detail\",\"Tags\":{},\"CreatedAt\":\"2026-10-19T07:30:00Z\"}" },
+  { "id": "connectivity-malformed", "topic": "garage/XP7YGCEL9PB123456/connectivity", "payload": "42" }
+]

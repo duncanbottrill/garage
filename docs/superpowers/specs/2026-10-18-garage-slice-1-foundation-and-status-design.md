@@ -44,8 +44,8 @@ Slice 1 replaces Tessie for daily use: live state of the car, controls, and the 
 Five parts, one job each.
 
 ```
- car ──(Fleet Telemetry, mTLS, protobuf)──▶ HA Green: Garage Bridge add-on ──▶ Supabase ──(Realtime)──▶ iPhone / Mac app
- car ◀──(signed command)── Tesla Fleet API ◀── HA Green: Tesla HTTP Proxy add-on ◀──(Tailscale)── iPhone / Mac app
+ car ──(Fleet Telemetry, mTLS, protobuf)──▶ HA Green: Garage Bridge add-on (telemetry) ──▶ Supabase ──(Realtime)──▶ iPhone / Mac app
+ car ◀──(signed command)── Tesla Fleet API ◀── HA Green: Garage Bridge add-on (proxy) ◀──(Tailscale)── iPhone / Mac app
                                              Vercel (garage domain): public key, OAuth callback, token refresh, small API
 ```
 
@@ -58,9 +58,7 @@ Five parts, one job each.
 
 | Component | Runs on | Does | Depends on |
 |---|---|---|---|
-| Tailscale add-on | HA Green | Joins the tailnet; Funnel exposes port 443 → telemetry receiver only; gives phone/Mac a private route to the proxy | Tailscale account (free) |
-| Tesla HTTP Proxy add-on (llamafilm) | HA Green | Holds the private key, signs commands, exposes REST on the tailnet address | Tesla access token (read from Supabase via Vercel-issued short-lived token, see 4.1) |
-| Garage Bridge add-on (ours) | HA Green | fleet-telemetry server (unmodified) + ingest worker; fetches the Tesla access token from `GET /api/bridge/token` with its per-owner bridge secret | Supabase service key, telemetry hostname, budget cap (all via HA add-on options) |
+| Garage Bridge add-on (ours) | HA Green | One add-on, four services: `tailscaled` (own tailnet node, Funnel exposes port 443 → telemetry receiver only, tailnet-only route to the proxy), Tesla's `tesla-http-proxy` (holds the private key, signs commands), Tesla's `fleet-telemetry` (unmodified), and the ingest worker, which fetches the Tesla access token from `GET /api/bridge/token` with its per-owner bridge secret. See §5. | Tailscale account (free); Supabase service key; bridge secret; Tesla command key (all via HA add-on options) |
 | Supabase | cloud | System of record; Realtime fan-out; RLS | — |
 | Vercel app (`apps/web`) | Vercel | Public key, OAuth callback, token refresh cron, authenticated API routes; later the home dashboard | Supabase, Upstash |
 | Apple app (`apps/apple`) | iPhone, Mac | Status UI, controls, onboarding | Supabase session, Tailscale on device |
@@ -72,14 +70,14 @@ Five parts, one job each.
 - One-time OAuth authorization-code flow with PKCE, started from the app, completed in the browser, landing on the Vercel callback. Scopes: `openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds vehicle_location`.
 - The refresh token is stored in Supabase table `tesla_credentials`, encrypted application-side with XChaCha20-Poly1305 (`encryptToken`, `packages/core`) before the write, readable only by the service role.
 - Tesla refresh tokens are single-use. Rotation happens in one place, `refreshAll`, behind a per-owner claim lock; the daily cron and the on-demand path in `/api/token` and `/api/bridge/token` both go through it, so there is at most one rotation per owner at a time.
-- The proxy add-on and the ingest worker call `GET /api/bridge/token` with their per-owner bridge secret on start and whenever a request returns 401. They never touch `tesla_credentials` directly and never refresh.
+- The proxy service and the ingest worker (both inside the Garage Bridge add-on) call `GET /api/bridge/token` with their per-owner bridge secret on start and whenever a request returns 401. They never touch `tesla_credentials` directly and never refresh.
 - Partner registration (`POST /api/1/partner_accounts` with the garage domain) is a one-time script in `apps/web/scripts/`, run from the Mac with the client credentials.
 
 ### 4.2 Virtual key
 
-- P-256 key pair generated once on the Mac with `openssl` (script in `addon/scripts/keygen.sh`).
+- P-256 key pair generated once on the Mac with `openssl` (script in `apps/web/scripts/keygen.sh`, per the runbook).
 - Public key committed to `apps/web/public/.well-known/appspecific/com.tesla.3p.public-key.pem`.
-- Private key pasted into the Tesla HTTP Proxy add-on options (HA stores add-on options encrypted at rest on the Green). It exists nowhere else; a copy in the Mac keychain is the backup.
+- Private key pasted into the Garage Bridge add-on's `tesla_private_key` option (HA stores add-on options encrypted at rest on the Green; the add-on restores line breaks lost by HA's single-line password field and validates the result before handing it to the proxy — see §5.2, §5.3). It exists nowhere else; a copy in the Mac keychain is the backup.
 - Pairing: Duncan opens `https://tesla.com/_ak/garage.duncanbottrill.com` on the phone with the Tesla app installed, at the car, and approves.
 
 ### 4.3 Commands
@@ -87,7 +85,7 @@ Five parts, one job each.
 The app calls the proxy over Tailscale:
 
 ```
-POST https://<green-tailnet-name>:4430/api/1/vehicles/{vin}/command/{name}
+POST https://<green-tailnet-name>:4443/api/1/vehicles/{vin}/command/{name}
 Authorization: Bearer <tesla access token>   (fetched by the app from Vercel /api/token, short-lived, see 7.2)
 ```
 
@@ -114,28 +112,82 @@ A "Refresh now" action in More (not on Status) makes one `vehicle_data` request 
 
 ## 5. Home Assistant layer
 
-### 5.1 Tailscale add-on
+**Amended 2026-10-19 (Plan 1B as built).** §5.1–5.3 below described three separate add-ons (Tailscale, Tesla HTTP Proxy, Garage Bridge). Plan 1B shipped one add-on instead — **Garage Bridge** — running `tailscaled`, Tesla's `tesla-http-proxy`, Tesla's `fleet-telemetry` and the ingest worker as four s6-supervised services in a single container. §5.1–5.8 below replace the three-add-on design with what actually shipped.
 
-- Official HA community add-on. Options: Funnel on, serve `tcp://localhost:8443` as raw TCP on 443 (TLS terminated by the telemetry server, not by Tailscale, because the car must present its client certificate to the server).
-- Certificate for the ts.net hostname obtained with `tailscale cert` inside the Tailscale add-on and written to `/share/garage/tls/` (the HA `share` folder is mountable by both add-ons). The bridge reads the cert and key from there and reloads the telemetry server when they change; a daily job in the Tailscale add-on's `post-run` script renews them.
-- If raw-TCP Funnel proves unavailable on the add-on build, fallback is router port-forward of 443 → Green:8443 with DuckDNS; the spec treats this as a documented alternative, not the plan.
+### 5.1 Processes (`garage-bridge/`, repo root)
 
-### 5.2 Tesla HTTP Proxy add-on
+Custom add-on repository `duncanbottrill/garage` (`repository.yaml` and `garage-bridge/config.yaml` at the repo root, as Home Assistant requires), architecture `aarch64` (and `amd64` for local dev), image built by GitHub Actions and pushed to GHCR; HA pulls the image (never builds it — both GHCR packages must be public, since the Green has no registry credentials).
 
-- llamafilm's add-on from its repository. Options: private key, domain `garage.duncanbottrill.com`, region EU, listen on the tailnet interface only, port 4430.
-- No code of ours. Health checked by the bridge (`GET /health`).
+One container, `s6-overlay` supervising five services:
 
-### 5.3 Garage Bridge add-on (`addon/`)
+| Service | Runs | Does |
+|---|---|---|
+| `tailscale` | `tailscaled --tun=userspace-networking` | Joins the tailnet as its own node (hostname configurable, `garage-bridge` by default); `tailscale serve --tcp=443 tcp://127.0.0.1:8443` plus `tailscale funnel 443 on` publishes the telemetry receiver to the public internet as a raw TCP forward (TLS, including the car's client certificate, terminates in `fleet-telemetry`, never in Tailscale); a second rule, `tailscale serve --tcp=4443 tcp://127.0.0.1:4443`, exposes the command proxy on the tailnet only — never funneled |
+| `tlscert` | `tailscale cert` | Issues/renews the Let's Encrypt certificate for the node's `*.ts.net` hostname once a day; see §5.6 |
+| `telemetry` | `fleet-telemetry` v0.9.5 (Tesla's binary, unmodified) | Terminates the car's mTLS stream on `0.0.0.0:8443`; republishes every record to the HA Mosquitto broker add-on on topics `garage/<VIN>/v/<Field>`, `garage/<VIN>/connectivity`, `garage/<VIN>/alerts/<name>/current`, `garage/<VIN>/errors/<name>` |
+| `proxy` | `tesla-http-proxy` v0.4.1 (`github.com/teslamotors/vehicle-command`) | Holds our Tesla command private key; signs Fleet API requests and, transparently, the telemetry config JWS; binds `127.0.0.1:4443` behind its own self-signed TLS pair (not the Let's Encrypt pair, which belongs to `telemetry`'s tailnet FQDN); reachable from the tailnet via the `tailscale serve` rule above |
+| `ingest` | Node 22, TypeScript, bundles `@garage/core` | Subscribes to the Mosquitto topics, writes `signals` and patches `vehicle_state`, registers the telemetry config through `proxy`, adapts cadence to `vehicles.budget_mode`; see §5.2 |
 
-- Custom add-on repository `duncanbottrill/garage` (`addon/repository.yaml`, `addon/garage-bridge/config.yaml`), architecture `aarch64` (and `amd64` for local dev), image built by GitHub Actions and pushed to GHCR; HA pulls the image.
-- One container, `s6-overlay` supervising two services:
-  1. `fleet-telemetry` (Tesla's binary) with `config.json` generated from add-on options at start.
-  2. `ingest` (Node 22, TypeScript): consumes decoded messages, writes `signals` in batches of ≤200 rows or every 2 s, upserts `vehicle_state`, maintains per-field `*_at` timestamps, emits connectivity state.
-- Add-on options: `supabase_url`, `supabase_service_key` (password type), `telemetry_hostname`, `budget_monthly_usd` (default 10), `log_level`.
-- Storage: no persistent writes except the TLS cert and `fleet-telemetry` config in `/data`. In-memory buffer of up to 5 minutes if Supabase is unreachable, then oldest-dropped with `dropped_count` surfaced in `vehicle_state.bridge_health`.
-- Health: writes a heartbeat to `vehicle_state.bridge_seen_at` every 30 s. The app treats >90 s as "bridge offline".
-- Designed with a second sink (MQTT for HA entities) behind an interface, implemented in slice 4.
+### 5.2 Ingest worker behaviour
 
+- Fetches a Tesla access token from `GET <garage_api_base>/api/bridge/token` with header `x-bridge-secret`. Never holds a Tesla refresh token and never persists an access token — it keeps the token in memory only, cached until ~60 s before its `expires_at` and re-fetched on a 401.
+- `signals` rows are batched (≤200 rows or every 2 s) and upserted; `vehicle_state` is written only through `merge_vehicle_state(p_vehicle, p_patch)` (§6.1), never directly.
+- A decoded value of `null` (Tesla's `"invalid"` wire value), a bare `SNA`, or an enum ending `Unknown`/`SNA` (e.g. `WindowStateUnknown`, `ShiftStateSNA`) means "no information" and produces no state patch — never a false `"null"` string, all-doors-closed, or `false`.
+- An in-memory buffer holds up to 5 minutes of pending `signals` rows when Supabase is unreachable; past that, the oldest rows are dropped and the count is surfaced in `vehicle_state.bridge_health`.
+- A `vehicle_state` patch that fails to write is re-queued underneath whatever arrived since it failed (newer values win key-by-key, including the known nested columns `doors`/`windows`/`tpms_bar`/`bridge_health`) and dropped after 3 consecutive failures, so one permanently-rejected patch cannot block every later one.
+- Heartbeat: `vehicle_state.bridge_seen_at` and `bridge_health` every 30 s, via the same `merge_vehicle_state` path. The app still treats >90 s as "bridge offline" (§10).
+
+### 5.3 Add-on options
+
+All secrets arrive through HA add-on options (encrypted at rest on the Green); none are baked into the image or repo.
+
+| Option | Type | Required | Default |
+|---|---|---|---|
+| `tailscale_enabled` | bool | yes | `true` |
+| `tailscale_authkey` | password | when `tailscale_enabled` | — |
+| `tailscale_hostname` | string | yes | `garage-bridge` |
+| `tesla_private_key` | password | when `tailscale_enabled` | — |
+| `tesla_vin` | string | yes | — |
+| `garage_api_base` | url | yes | `https://garage.duncanbottrill.com` |
+| `bridge_secret` | password | yes | — |
+| `supabase_url` | url | yes | — |
+| `supabase_service_key` | password | yes | — |
+| `mqtt_host` | string | yes | `core-mosquitto` |
+| `mqtt_port` | port | yes | `1883` |
+| `mqtt_username` | string | no | — |
+| `mqtt_password` | password | no | — |
+| `log_level` | list | yes | `info` |
+
+`tesla_private_key` is pasted as a YAML block scalar (`|`) in the Configuration tab's YAML editor, since the normal single-line password field strips its newlines; the add-on restores line breaks and validates the key before handing it to `proxy`, idling with a clear log line rather than crash-looping if it still doesn't parse. Full detail and the exact YAML form: `garage-bridge/DOCS.md`.
+
+### 5.4 Telemetry config registration
+
+- Registered through `proxy` at `POST /api/1/vehicles/fleet_telemetry_config` with `{ vins: [VIN], config }`; the proxy signs it (`Tesla.SS256`) and forwards to `fleet_telemetry_config_jws`. Config body: `hostname` = the node's tailnet FQDN, `port` 443, `ca` = the PEM chain from `tailscale cert`, `fields` per budget mode (§5.5), `alert_types: ["service"]`, `exp` = now + 180 days.
+- Confirmed by polling `GET /api/1/vehicles/{vin}/fleet_telemetry_config`. A poll counts as confirmation only when the response has `synced: true`, `key_paired !== false`, and a `config` object whose `hostname` and field-name set match ours — a missing or `null` config, or one that doesn't match, proves nothing about what the car is actually streaming and is never trusted.
+- Tesla answers the POST with HTTP 200 even when it skipped our VIN, listing it under `response.skipped_vehicles.<reason>` (`missing_key` — the virtual key isn't paired — `unsupported_hardware`, `unsupported_firmware`, `max_configs`). A skipped POST is treated as a failure, not a success: `telemetry_last_error = skipped:<reason>`, the normal POST backoff applies, and pairing the key afterwards is picked up on the next retry without an add-on restart.
+- POST failures (including a skip) back off from 15 minutes, doubling to a 6-hour cap. Once a POST is accepted, confirmation is polled up to 40 times, 15 s apart (~10 min); if that run doesn't confirm, later checks poll on a separately-doubling 5 min → 60 min schedule, up to 4 attempts each.
+- `vehicles.telemetry_config_hash` is the SHA-256 of the canonical JSON of `{ hostname, ca_sha256, fields }` — so a tailnet FQDN change or a rotated CA chain re-registers the car, not only a cadence/budget-mode change. A confirmation is also treated as stale (forcing re-registration) once `telemetry_confirmed_at` is more than 150 days old, ahead of the config's own 180-day `exp`.
+
+### 5.5 Cadence by budget mode
+
+`normal` tier (32 fields; `minimum_delta` noted where Tesla's schema carries one, resend interval for the three fields re-sent on an hourly ceiling even if unchanged): `Location` 10 s, `VehicleSpeed` 10 s, `Soc` 60 s (Δ0.5), `BatteryLevel` 60 s, `EstBatteryRange` 60 s (Δ1), `ChargeState` 10 s, `DetailedChargeState` 10 s, `ACChargingPower`/`DCChargingPower`/`ChargeAmps` 30 s, `ChargeLimitSoc` 60 s, `ChargePortDoorOpen` 10 s, `ScheduledChargingStartTime` 300 s, `InsideTemp`/`OutsideTemp` 60 s (Δ0.5), `HvacPower` 10 s, `ClimateKeeperMode` 60 s, `Odometer` 60 s (Δ0.1), `Gear`/`Locked`/`DoorState` 1 s (resend hourly), `FdWindow`/`FpWindow`/`RdWindow`/`RpWindow` 5 s, `TpmsPressureFl/Fr/Rl/Rr` 300 s, `SentryMode` 10 s, `VehicleName`/`SoftwareUpdateVersion` 3600 s.
+
+`reduced` triples every interval (minimum 1 s); `minimal` sextuples every interval and drops `VehicleSpeed` (`Location` lands on 60 s purely because 10 × 6 = 60, with no special-casing needed). `minimum_delta` and the resend ceiling are never scaled by budget mode — a stuck door/gear/lock value must still re-confirm hourly even under `minimal`.
+
+### 5.6 Certificates
+
+`tlscert` issues/renews the node's Let's Encrypt certificate once a day via `tailscale cert`, writing `server.crt`/`server.key`/`ca.pem` to temp files then `mv`-ing them into place (key first, so a reader never sees a certificate without its key). It takes the leaf certificate's SHA-256 fingerprint before and after each issue; on a change, it restarts `telemetry` (`s6-svc -r`, guarded on the service directory existing) so the renewed pair is picked up without a full add-on restart — `fleet-telemetry` otherwise reads its TLS pair once at startup and would keep serving the expiring certificate. `ca.pem` is the Let's Encrypt intermediate chain with the build-time-baked ISRG Root X1 appended unless the chain `tailscale cert` returned already ends in it.
+
+### 5.7 Persistence
+
+Nothing persists outside `/data` on the Green's eMMC: `/data/tailscale` (node state/keys), `/data/tls` (the Let's Encrypt pair and chain), `/data/private-key.pem` (the normalised Tesla command key, mode 600), `/data/proxy-tls` (the proxy's own self-signed pair), `/data/config.json` (`fleet-telemetry`'s rendered config). The ingest's own bounded in-memory buffers (§5.2) are the only place a brief Supabase outage is absorbed; nothing is spooled to disk for that.
+
+### 5.8 Deferred
+
+- A bridge credential narrower than the full Supabase service key — still deferred from the 1A.2 review; the ingest holds the full service key today.
+- `merge_vehicle_state`'s `p_clear` parameter and a merge staleness guard (§6.1) — still deferred from the 1A.2 review. The ingest only ever sends fields it actually received, so staleness mainly matters against a manual refresh (§4.6), which is rare.
+- The `proxy` service's own TLS listener uses a self-signed certificate on the tailnet rather than a trusted one; deferred to Plan 1C.
+- MQTT → HA entity discovery, so the car's fields show up as native HA sensors/automations, is deferred to slice 4. `fleet-telemetry` already publishes the per-field topics a later discovery layer would consume.
 ## 6. Data model (Supabase)
 
 Migrations in `supabase/migrations/`, numbered. RLS enabled on every table; policies scope by `owner_id = auth.uid()`; the service role bypasses for the bridge and Vercel.
@@ -266,7 +318,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 
 ## 12. Testing
 
-- `addon/ingest`: unit tests on decode → state mapping with recorded fixtures (captured from the real car once streaming) and synthetic edge cases (sleep mid-drive, dropout, out-of-order timestamps). Integration test runs the real `fleet-telemetry` binary with a replayed stream against a local Supabase.
+- `garage-bridge/ingest`: unit tests on decode → state mapping with recorded fixtures (captured from the real car once streaming) and synthetic edge cases (sleep mid-drive, dropout, out-of-order timestamps). Integration test runs the real `fleet-telemetry` binary with a replayed stream against a local Supabase.
 - `apps/web`: route tests with mocked Tesla endpoints; PKCE/state checks; cron idempotency (refresh twice → one rotation).
 - `apps/apple`: GarageKit unit tests (freshness, optimistic revert, idempotency); snapshot tests of Status/Climate/Charge/More in states live, stale, offline, pending.
 - `supabase`: migrations applied in CI against a branch database; RLS policy tests (owner A cannot read owner B).
@@ -275,7 +327,8 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 
 ```
 garage/
-  addon/                 HA add-on repository (repository.yaml, garage-bridge/)
+  repository.yaml        HA add-on repository descriptor (repo root, as HA requires)
+  garage-bridge/          Garage Bridge HA add-on
   apps/web/              Next.js on Vercel (garage domain)
   apps/apple/            Xcode project + GarageKit package
   packages/tokens/       tokens.json → Swift + CSS generators
@@ -302,6 +355,6 @@ garage/
 
 ## 16. Open items carried into the plan
 
-- Confirm raw-TCP Funnel is available in the HA Tailscale add-on build on HAOS 16.x; otherwise use the documented port-forward fallback.
+- ~~Confirm raw-TCP Funnel is available in the HA Tailscale add-on build~~ — resolved in Plan 1B Task 2: `tailscaled` inside the Garage Bridge add-on publishes raw-TCP Funnel directly (§5); the port-forward/DuckDNS fallback was not needed.
 - Capture a real telemetry fixture in the first week of streaming and freeze it as the test corpus.
 - Decide the app's bundle id and the `garage://` URL scheme at project creation.
