@@ -75,6 +75,12 @@ jobs:
 
       - name: Read add-on version and compute tags
         id: version
+        # Home Assistant pulls the image by the config.yaml version, so that
+        # tag must only ever be pushed from a release tag: a branch push
+        # re-pushing :<version> would hand a reinstall unreleased code.
+        #   branch push / dispatch -> :edge and :sha-<short7> only
+        #   bridge-v<version> tag  -> :<version> and :latest, and the tag must
+        #                             match the config.yaml version exactly
         run: |
           VERSION="$(grep -E '^version:' garage-bridge/config.yaml | sed -E 's/version: *"?([^"]*)"?/\1/')"
           if [ -z "${VERSION}" ]; then
@@ -84,12 +90,19 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
           IMAGE="ghcr.io/duncanbottrill/garage-bridge-${{ matrix.arch }}"
+          if [[ "${GITHUB_REF}" == refs/tags/bridge-v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#bridge-v}"
+            if [ "${TAG_VERSION}" != "${VERSION}" ]; then
+              echo "tag ${GITHUB_REF_NAME} does not match garage-bridge/config.yaml version ${VERSION}" >&2
+              exit 1
+            fi
+            TAGS="${IMAGE}:${VERSION}"$'\n'"${IMAGE}:latest"
+          else
+            TAGS="${IMAGE}:edge"$'\n'"${IMAGE}:sha-${GITHUB_SHA::7}"
+          fi
           {
             echo "tags<<EOF"
-            echo "${IMAGE}:${VERSION}"
-            if [[ "${GITHUB_REF}" == refs/tags/bridge-v* ]]; then
-              echo "${IMAGE}:latest"
-            fi
+            echo "${TAGS}"
             echo "EOF"
           } >> "${GITHUB_OUTPUT}"
 
