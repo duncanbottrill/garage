@@ -11,7 +11,63 @@
 # restarted to pick it up; otherwise it would keep serving the old cert
 # until it expired. All files are written to a temp path and moved into
 # place, so a reader never sees a half-written cert, key or chain.
+#
+# Hostname mode (the `telemetry_hostname` option is set): Tesla only
+# accepts a telemetry hostname under the partner domain, so the Tailscale
+# FQDN is not used at all. garage-private-ca issues the fleet-telemetry leaf
+# for that hostname from the add-on's own private CA (and writes the CA cert
+# to /data/tls/ca.pem for the telemetry config), right away and then every
+# 24h; this mode never waits for tailscale, and also applies when
+# tailscale_enabled is false. Once the leaf and ca.pem are in place the
+# hostname is written to /data/telemetry-hostname, which the ingest waits
+# for before registering (so it never sends a CA chain left over from the
+# tailnet mode). Without the option, the Tailscale-cert path below runs
+# unchanged.
 set -euo pipefail
+
+TELEMETRY_HOSTNAME=""
+if bashio::config.has_value 'telemetry_hostname'; then
+  # Hostnames contain no whitespace; strip any pasted along with it.
+  TELEMETRY_HOSTNAME="$(bashio::config 'telemetry_hostname' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+fi
+
+if [ -n "${TELEMETRY_HOSTNAME}" ]; then
+  MARKER=/data/telemetry-hostname
+  # Not valid again until this run has the leaf and ca.pem for the hostname.
+  rm -f "${MARKER}"
+  bashio::log.info "tlscert: telemetry_hostname is ${TELEMETRY_HOSTNAME}; serving fleet-telemetry with the add-on's private CA (/data/ca), not a Tailscale certificate"
+
+  while true; do
+    if RESULT="$(GARAGE_DATA_DIR=/data /usr/bin/garage-private-ca "${TELEMETRY_HOSTNAME}")"; then
+      printf '%s\n' "${TELEMETRY_HOSTNAME}" > "${MARKER}.tmp"
+      mv "${MARKER}.tmp" "${MARKER}"
+      case "${RESULT}" in
+        issued|renewed)
+          bashio::log.info "tlscert: private-CA certificate for ${TELEMETRY_HOSTNAME} ${RESULT}"
+          if [ -d /run/service/telemetry ]; then
+            bashio::log.info "tlscert: restarting fleet-telemetry to load it"
+            s6-svc -r /run/service/telemetry || bashio::log.error "tlscert: could not restart /run/service/telemetry"
+          else
+            bashio::log.info "tlscert: telemetry service not up yet, it will load the new pair when it starts"
+          fi
+          ;;
+        *)
+          bashio::log.info "tlscert: private-CA certificate for ${TELEMETRY_HOSTNAME} unchanged"
+          ;;
+      esac
+    else
+      RC=$?
+      if [ "${RC}" -eq 2 ]; then
+        bashio::log.error "tlscert: telemetry_hostname '${TELEMETRY_HOSTNAME}' is not a valid DNS name (e.g. telemetry.garage.duncanbottrill.com). Fix the option; idling."
+        exec sleep infinity
+      fi
+      bashio::log.error "tlscert: could not issue the private-CA certificate for ${TELEMETRY_HOSTNAME}; retrying in 10 minutes"
+      sleep 600
+      continue
+    fi
+    sleep 86400
+  done
+fi
 
 if ! bashio::config.true 'tailscale_enabled'; then
   bashio::log.warning "tlscert: tailscale disabled, expecting /data/tls to be provided"

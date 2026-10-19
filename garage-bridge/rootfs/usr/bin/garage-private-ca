@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Usage: garage-private-ca <hostname>
+#
+# Maintains the add-on's own private CA and the fleet-telemetry server leaf
+# for <hostname> (the public telemetry hostname under the Tesla partner
+# domain). The car trusts the leaf through the `ca` field of the Fleet
+# Telemetry config, so no public certificate is needed.
+#
+#   ${GARAGE_DATA_DIR:-/data}/ca/ca.key    CA private key (P-256, 0600)
+#   ${GARAGE_DATA_DIR:-/data}/ca/ca.pem    CA cert, CN "Garage Bridge CA", 10 years
+#   ${GARAGE_DATA_DIR:-/data}/tls/server.key  leaf key (P-256, 0600)
+#   ${GARAGE_DATA_DIR:-/data}/tls/server.crt  leaf cert ONLY (no chain), 90 days
+#   ${GARAGE_DATA_DIR:-/data}/tls/ca.pem      copy of the CA cert (sent to Tesla)
+#
+# Idempotent. Creates the CA when either half is missing (or the CA cert
+# expires within 30 days). Issues a new leaf when there is none, when it
+# expires within 30 days, when its SAN does not contain DNS:<hostname>, when
+# it no longer verifies against the CA (the CA was replaced) or when its key
+# is missing. Every file is written to a temp path and moved into place.
+#
+# Prints exactly one word on stdout: "issued" (no leaf existed), "renewed"
+# (an existing leaf was replaced) or "unchanged", so the caller knows whether
+# fleet-telemetry must be restarted. Diagnostics go to stderr. Never prints
+# key material. Exit 2 on a bad hostname, 1 on any openssl failure.
+set -euo pipefail
+
+usage() {
+  echo "usage: garage-private-ca <hostname>" >&2
+  exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+
+HOST="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+# DNS name with at least two labels; letters, digits and inner hyphens only.
+# Validated because it is interpolated into openssl config files.
+host_re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+if [ "${#HOST}" -gt 253 ] || [[ ! "${HOST}" =~ ${host_re} ]]; then
+  echo "garage-private-ca: invalid hostname $(printf "%q" "${HOST}")" >&2
+  exit 2
+fi
+
+DATA_DIR="${GARAGE_DATA_DIR:-/data}"
+CA_DIR="${DATA_DIR}/ca"
+TLS_DIR="${DATA_DIR}/tls"
+CA_KEY="${CA_DIR}/ca.key"
+CA_PEM="${CA_DIR}/ca.pem"
+LEAF_KEY="${TLS_DIR}/server.key"
+LEAF_CRT="${TLS_DIR}/server.crt"
+TLS_CA="${TLS_DIR}/ca.pem"
+RENEW_BEFORE_S=2592000 # 30 days
+
+mkdir -p "${CA_DIR}" "${TLS_DIR}"
+chmod 700 "${CA_DIR}"
+
+WORK="$(mktemp -d)"
+# shellcheck disable=SC2317 # invoked via the trap
+cleanup() {
+  rm -rf "${WORK}"
+  rm -f "${CA_KEY}.tmp" "${CA_PEM}.tmp" "${LEAF_KEY}.tmp" "${LEAF_CRT}.tmp" "${TLS_CA}.tmp"
+}
+trap cleanup EXIT
+
+# Generates a P-256 private key at $1 with mode 0600 (umask in a subshell so
+# the key file is never briefly group/world readable).
+gen_key() {
+  (umask 0177 && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1" 2>/dev/null) || {
+    echo "garage-private-ca: could not generate a P-256 key" >&2
+    return 1
+  }
+}
+
+# A random positive 128-bit serial.
+serial() {
+  printf '0x%s' "$(openssl rand -hex 16)"
+}
+
+# --- CA ---------------------------------------------------------------
+ca_valid() {
+  [ -s "${CA_KEY}" ] && [ -s "${CA_PEM}" ] \
+    && openssl x509 -in "${CA_PEM}" -noout -checkend "${RENEW_BEFORE_S}" >/dev/null 2>&1
+}
+
+if ! ca_valid; then
+  echo "garage-private-ca: creating a new private CA in ${CA_DIR}" >&2
+  cat > "${WORK}/ca.cnf" <<'EOF'
+[req]
+distinguished_name = dn
+prompt = no
+[dn]
+CN = Garage Bridge CA
+[v3_ca]
+basicConstraints = critical,CA:true
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+EOF
+  gen_key "${CA_KEY}.tmp"
+  openssl req -x509 -new -config "${WORK}/ca.cnf" -extensions v3_ca \
+    -key "${CA_KEY}.tmp" -sha256 -days 3650 -set_serial "$(serial)" \
+    -out "${CA_PEM}.tmp" >/dev/null 2>&1 || {
+    echo "garage-private-ca: could not create the CA certificate" >&2
+    exit 1
+  }
+  mv "${CA_KEY}.tmp" "${CA_KEY}"
+  mv "${CA_PEM}.tmp" "${CA_PEM}"
+fi
+
+# --- leaf ---------------------------------------------------------------
+leaf_has_host() {
+  openssl x509 -in "${LEAF_CRT}" -noout -ext subjectAltName 2>/dev/null \
+    | tail -n +2 | tr ',' '\n' | tr -d ' ' | grep -Fxq "DNS:${HOST}"
+}
+
+leaf_ok() {
+  [ -s "${LEAF_CRT}" ] && [ -s "${LEAF_KEY}" ] \
+    && openssl x509 -in "${LEAF_CRT}" -noout -checkend "${RENEW_BEFORE_S}" >/dev/null 2>&1 \
+    && leaf_has_host \
+    && openssl verify -CAfile "${CA_PEM}" "${LEAF_CRT}" >/dev/null 2>&1
+}
+
+STATUS=unchanged
+if ! leaf_ok; then
+  if [ -s "${LEAF_CRT}" ]; then STATUS=renewed; else STATUS=issued; fi
+
+  cat > "${WORK}/leaf.cnf" <<EOF
+[req]
+distinguished_name = dn
+prompt = no
+[dn]
+CN = ${HOST}
+[v3_leaf]
+basicConstraints = critical,CA:false
+keyUsage = digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:${HOST}
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+EOF
+  gen_key "${LEAF_KEY}.tmp"
+  openssl req -new -config "${WORK}/leaf.cnf" -key "${LEAF_KEY}.tmp" \
+    -out "${WORK}/leaf.csr" >/dev/null 2>&1 || {
+    echo "garage-private-ca: could not create the leaf CSR" >&2
+    exit 1
+  }
+  openssl x509 -req -in "${WORK}/leaf.csr" \
+    -CA "${CA_PEM}" -CAkey "${CA_KEY}" -set_serial "$(serial)" \
+    -sha256 -days 90 -extfile "${WORK}/leaf.cnf" -extensions v3_leaf \
+    -out "${LEAF_CRT}.tmp" >/dev/null 2>&1 || {
+    echo "garage-private-ca: could not sign the leaf certificate" >&2
+    exit 1
+  }
+  # Key first, then cert: by the time the new cert is visible, its key is too.
+  mv "${LEAF_KEY}.tmp" "${LEAF_KEY}"
+  mv "${LEAF_CRT}.tmp" "${LEAF_CRT}"
+fi
+
+# ca.pem for the telemetry config: always exactly the CA cert (it may still
+# hold the Let's Encrypt chain from the tailnet mode).
+if ! cmp -s "${CA_PEM}" "${TLS_CA}"; then
+  cp "${CA_PEM}" "${TLS_CA}.tmp"
+  chmod 644 "${TLS_CA}.tmp"
+  mv "${TLS_CA}.tmp" "${TLS_CA}"
+fi
+
+echo "${STATUS}"
