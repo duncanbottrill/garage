@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { decodePayload } from "../src/decode";
-import { toSignalRow, toStatePatch, type BridgeEvent } from "../src/state";
+import { sanitizeStatePatch, toSignalRow, toStatePatch, type BridgeEvent } from "../src/state";
 import fixtures from "./fixtures/mqtt-samples.json";
 
 function payloadFor(id: string): unknown {
@@ -152,4 +152,53 @@ describe("toStatePatch: null and Unknown values carry no information", () => {
   it("ShiftStateSNA → {}", () => expect(toStatePatch(field("Gear", "ShiftStateSNA"))).toEqual({}));
   it("a wrapped Unknown enum ({\"windowStateValue\":\"WindowStateUnknown\"}) → {}", () =>
     expect(toStatePatch(field("FdWindow", decodePayload('{"windowStateValue":"WindowStateUnknown"}')))).toEqual({}));
+});
+
+describe("toStatePatch / sanitizeStatePatch: type validation drops bad keys, not the whole patch", () => {
+  const field = (name: string, value: unknown): BridgeEvent => ({ kind: "field", vin: "VIN1", name, value, at: AT });
+
+  it("drops a non-finite number but keeps the rest of the patch", () => {
+    expect(sanitizeStatePatch({ soc: Infinity, charge_at: AT.toISOString() })).toEqual({ charge_at: AT.toISOString() });
+    expect(sanitizeStatePatch({ inside_c: Number.NaN, climate_at: AT.toISOString() })).toEqual({ climate_at: AT.toISOString() });
+  });
+
+  it("a Soc of '1e400' (Infinity after coercion) keeps charge_at only", () => {
+    expect(toStatePatch(field("Soc", "1e400"))).toEqual({ charge_at: AT.toISOString() });
+  });
+
+  it("drops lat/lng/location_at together when latitude is outside [-90, 90]", () => {
+    expect(toStatePatch(field("Location", { latitude: 95, longitude: -1.7 }))).toEqual({});
+    expect(sanitizeStatePatch({ lat: -90.01, lng: 10, location_at: AT.toISOString(), speed_kph: 0 })).toEqual({ speed_kph: 0 });
+  });
+
+  it("drops lat/lng/location_at together when longitude is outside [-180, 180]", () => {
+    expect(toStatePatch(field("Location", { latitude: 54.4, longitude: 181 }))).toEqual({});
+  });
+
+  it("drops lat/lng/location_at when either coordinate is not a number", () => {
+    expect(sanitizeStatePatch({ lat: "54.4" as unknown as number, lng: -1.7, location_at: AT.toISOString() })).toEqual({});
+  });
+
+  it("keeps a valid location, including the boundary values", () => {
+    expect(toStatePatch(field("Location", { latitude: -90, longitude: 180 }))).toEqual({ lat: -90, lng: 180, location_at: AT.toISOString() });
+  });
+
+  it("keeps charge_limit_soc only when it is an integer in [0, 100]", () => {
+    expect(toStatePatch(field("ChargeLimitSoc", 80))).toEqual({ charge_limit_soc: 80 });
+    expect(toStatePatch(field("ChargeLimitSoc", 0))).toEqual({ charge_limit_soc: 0 });
+    expect(toStatePatch(field("ChargeLimitSoc", 100))).toEqual({ charge_limit_soc: 100 });
+    expect(toStatePatch(field("ChargeLimitSoc", 80.5))).toEqual({});
+    expect(toStatePatch(field("ChargeLimitSoc", 101))).toEqual({});
+    expect(toStatePatch(field("ChargeLimitSoc", -1))).toEqual({});
+  });
+
+  it("drops non-finite tpms_bar entries, and the key itself when nothing is left", () => {
+    expect(sanitizeStatePatch({ tpms_bar: { fl: Infinity, fr: 2.9 } as never })).toEqual({ tpms_bar: { fr: 2.9 } });
+    expect(toStatePatch(field("TpmsPressureFl", "1e400"))).toEqual({});
+  });
+
+  it("leaves a fully valid patch unchanged", () => {
+    const patch = { soc: 72.5, charge_at: AT.toISOString(), locked: true, body_at: AT.toISOString(), gear: "D" };
+    expect(sanitizeStatePatch(patch)).toEqual(patch);
+  });
 });

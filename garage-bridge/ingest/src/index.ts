@@ -24,6 +24,7 @@ const FLUSH_INTERVAL_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const BUDGET_POLL_MS = 5 * 60_000;
 const FORCE_FLUSH_AHEAD_MS = 2_500; // > Batcher's default maxAgeMs, well under maxBufferMs
+const MAX_PATCH_ATTEMPTS = 3; // consecutive mergeState failures before a pending patch is dropped
 
 export type Logger = (level: LogLevel, msg: string, extra?: Record<string, unknown>) => void;
 
@@ -75,7 +76,11 @@ function readCaPem(): string | null {
 export interface PatchAccumulator {
   /** Merges an incoming state patch into whatever's pending (deep-merging the known nested columns). */
   merge(patch: Record<string, unknown>): void;
-  /** Flushes whatever's pending via `sink.mergeState`, or no-ops if nothing is pending. Never throws. */
+  /**
+   * Flushes whatever's pending via `sink.mergeState`, or no-ops if nothing
+   * is pending. Never throws. A failed patch is re-queued under newer data
+   * and dropped after 3 consecutive failures.
+   */
   flush(): Promise<void>;
 }
 
@@ -88,6 +93,8 @@ export interface PatchAccumulator {
  */
 export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: Health, log: Logger): PatchAccumulator {
   let pendingPatch: Record<string, unknown> = {};
+  // Consecutive mergeState failures of the (re-queued) pending patch.
+  let consecutiveFailures = 0;
   // Tracks a `sink.mergeState` call already in flight, the same way
   // `Batcher` tracks `flushingPromise` — so a shutdown-time flush() never
   // starts a second, overlapping mergeState call alongside a periodic
@@ -103,13 +110,23 @@ export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: H
     const task = (async () => {
       try {
         await sink.mergeState(patch);
+        consecutiveFailures = 0;
       } catch (err) {
-        // Drop the failed patch rather than re-queuing it behind whatever's
-        // accumulated since: an old patch re-merged later could overwrite
-        // newer state with stale values. Each tick's accumulator only ever
-        // holds what arrived since the last successful (or dropped) flush.
         health.patchFailed(err);
-        log("error", "mergeState failed, dropping patch", { error: errMsg(err) });
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_PATCH_ATTEMPTS) {
+          // A patch rejected this many times in a row is most likely
+          // permanently bad (e.g. a cast error); stop retrying it so it
+          // cannot block every later patch forever.
+          consecutiveFailures = 0;
+          log("error", `mergeState failed ${MAX_PATCH_ATTEMPTS} times in a row, dropping patch`, { error: errMsg(err) });
+          return;
+        }
+        // Re-queue UNDERNEATH whatever arrived since (including while this
+        // call was in flight): newer values win, but a one-off Supabase blip
+        // no longer loses e.g. a lock change that only resends hourly.
+        pendingPatch = mergePatch(patch, pendingPatch);
+        log("warning", "mergeState failed, re-queuing patch", { error: errMsg(err), attempt: consecutiveFailures });
       }
     })();
 
