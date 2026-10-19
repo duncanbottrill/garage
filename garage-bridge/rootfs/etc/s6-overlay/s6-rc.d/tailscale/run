@@ -83,6 +83,10 @@ mv /data/tailscale/fqdn.tmp /data/tailscale/fqdn
 bashio::log.info "tailscale up as ${FQDN}"
 
 if ! /usr/bin/garage-tailscale-publish; then
+  if bashio::config.has_value 'telemetry_hostname' \
+      && [ -n "$(bashio::config 'telemetry_hostname' | tr -d '[:space:]')" ]; then
+    fail "could not publish the proxy port 4443 on the tailnet. Check the serve output above and the tailnet policy for tag:garage. See the add-on Documentation, Troubleshooting."
+  fi
   fail "could not publish port 443 through Tailscale Funnel. Likely causes: Funnel is not enabled for tag:garage in the tailnet policy (nodeAttrs funnel), or HTTPS certificates are off. See the add-on Documentation, Troubleshooting."
 fi
 

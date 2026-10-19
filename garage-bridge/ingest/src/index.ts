@@ -23,6 +23,15 @@ const VEHICLE_POLL_MS = 30_000;
 const FLUSH_INTERVAL_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const BUDGET_POLL_MS = 5 * 60_000;
+// One-shot retry after a telemetry-config ensure that was skipped (inputs not
+// ready yet) or threw, so a first boot registers within seconds of the TLS
+// material appearing rather than at the next 5-minute budget poll.
+const TELEMETRY_RETRY_MS = 30_000;
+// Consecutive fast retries allowed after attempts that THREW (e.g. the
+// bridge-token endpoint unreachable); after that the 5-minute budget poll
+// takes over until an attempt returns without throwing. Not-ready skips are
+// not capped.
+const TELEMETRY_MAX_THROW_RETRIES = 5;
 const FORCE_FLUSH_AHEAD_MS = 2_500; // > Batcher's default maxAgeMs, well under maxBufferMs
 const MAX_PATCH_ATTEMPTS = 3; // consecutive mergeState failures before a pending patch is dropped
 
@@ -71,6 +80,171 @@ function readCaPem(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The hostname `tlscert` writes to `/data/telemetry-hostname` once the
+ * private-CA leaf and `ca.pem` for it are in place (hostname mode only).
+ */
+function readHostnameMarker(): string | null {
+  try {
+    return readFileSync("/data/telemetry-hostname", "utf8").trim().toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+export interface TelemetryEnsurerDeps {
+  manager: { ensure(mode: BudgetMode, ctx: { fqdn: string; caPem: string }): Promise<EnsureResult> };
+  /** `options.telemetry_hostname`: set = hostname mode (private CA), unset = tailnet FQDN mode. */
+  telemetryHostname: string | undefined;
+  /** Throws while the tailnet FQDN is not written yet. Only used in tailnet mode. */
+  readFqdn: () => string;
+  readCaPem: () => string | null;
+  /** Only used in hostname mode. */
+  readHostnameMarker: () => string | null;
+  log: Logger;
+  isStopping: () => boolean;
+  retryMs?: number;
+  /** Cap on consecutive fast retries after thrown attempts (default 5). */
+  maxThrowRetries?: number;
+}
+
+export interface TelemetryEnsurer {
+  /** Runs one ensure for `mode`. Never throws. */
+  run(mode: BudgetMode): Promise<void>;
+  /** Clears a pending fast retry (shutdown). */
+  cancel(): void;
+}
+
+/**
+ * Wires the telemetry-config manager to the files the shell services write.
+ * Picks the registered hostname (`telemetry_hostname` when set, otherwise the
+ * tailnet FQDN) and waits only for what that mode needs: hostname mode needs
+ * `ca.pem` plus the marker naming this hostname (so a CA chain left over from
+ * the tailnet mode is never registered against the new hostname); tailnet
+ * mode needs the FQDN and `ca.pem`, as before.
+ *
+ * When a run is skipped as not ready, or `ensure()` throws, a single one-shot
+ * retry is scheduled `retryMs` later (default 30 s) instead of waiting for the
+ * next 5-minute budget poll. Bounded: at most one timer exists at a time
+ * (every run clears the pending one first), none is scheduled once the config
+ * has been confirmed (`changed: true` or `current`) or while stopping, and
+ * results the manager already backs off on itself (post_failed, poll_backoff,
+ * token_error, ...) are left to that schedule. Fast retries after a thrown
+ * attempt are capped at `maxThrowRetries` (default 5) in a row; after that
+ * only the budget poll retries, until an attempt returns without throwing
+ * (a not-ready skip counts), which resets the count. Not-ready skips keep
+ * retrying every `retryMs` without a cap.
+ */
+export function createTelemetryEnsurer(deps: TelemetryEnsurerDeps): TelemetryEnsurer {
+  const retryMs = deps.retryMs ?? TELEMETRY_RETRY_MS;
+  const maxThrowRetries = deps.maxThrowRetries ?? TELEMETRY_MAX_THROW_RETRIES;
+  const { log } = deps;
+  let retryTimer: NodeJS.Timeout | null = null;
+  let confirmed = false;
+  let lastMode: BudgetMode = "normal";
+  // Fast retries already scheduled for the current run of thrown attempts.
+  let throwRetries = 0;
+
+  function clearRetry(): void {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+
+  /** Returns whether a retry is now pending. */
+  function scheduleRetry(): boolean {
+    if (retryTimer) return true;
+    if (confirmed || deps.isStopping()) return false;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (deps.isStopping()) return;
+      void attempt(lastMode, true);
+    }, retryMs);
+    return true;
+  }
+
+  function logEnsureResult(result: EnsureResult): void {
+    if (result.changed) {
+      log("info", "telemetry config ensure", { result });
+    } else if (ROUTINE_ENSURE_REASONS.has(result.reason)) {
+      log("debug", "telemetry config ensure skipped", { result });
+    } else {
+      log("warning", "telemetry config ensure not synced", { result });
+    }
+  }
+
+  // The not-ready skip keeps its warning on scheduled runs (budget poll,
+  // every 5 min, as before) and drops to debug on the 30 s fast retries.
+  function readContext(skipLevel: LogLevel): { fqdn: string; caPem: string } | null {
+    if (deps.telemetryHostname) {
+      const caPem = deps.readCaPem();
+      const marker = deps.readHostnameMarker();
+      if (!caPem || marker !== deps.telemetryHostname) {
+        log(skipLevel, "telemetry config skipped: private CA not ready yet", {
+          hostname: deps.telemetryHostname,
+          ca_pem: caPem ? "present" : "missing",
+          marker: marker === null ? "missing" : marker === deps.telemetryHostname ? "match" : "other_hostname",
+        });
+        return null;
+      }
+      return { fqdn: deps.telemetryHostname, caPem };
+    }
+
+    let fqdn: string | null;
+    try {
+      fqdn = deps.readFqdn();
+    } catch (err) {
+      fqdn = null;
+      log("debug", "tailnet FQDN not ready", { error: errMsg(err) });
+    }
+    const caPem = deps.readCaPem();
+    if (!fqdn || !caPem) {
+      log(skipLevel, "telemetry config skipped: tailnet FQDN or CA chain not ready yet");
+      return null;
+    }
+    return { fqdn, caPem };
+  }
+
+  async function attempt(mode: BudgetMode, fromRetry: boolean): Promise<void> {
+    lastMode = mode;
+    clearRetry();
+
+    const ctx = readContext(fromRetry ? "debug" : "warning");
+    if (!ctx) {
+      throwRetries = 0;
+      scheduleRetry();
+      return;
+    }
+    try {
+      const result = await deps.manager.ensure(mode, ctx);
+      throwRetries = 0;
+      logEnsureResult(result);
+      if (result.changed || result.reason === "current") {
+        confirmed = true;
+      } else if (result.reason !== "in_flight") {
+        // The manager reports the config as not (or no longer) confirmed;
+        // its own backoff governs the next attempt, but a later skip or
+        // throw may fast-retry again.
+        confirmed = false;
+      }
+    } catch (err) {
+      log("error", "telemetry config ensure failed", { error: errMsg(err) });
+      if (throwRetries < maxThrowRetries) {
+        if (scheduleRetry()) throwRetries++;
+      } else if (throwRetries === maxThrowRetries) {
+        throwRetries++; // log the hand-over once per run of failures
+        log("warning", "telemetry config ensure keeps failing; next attempt at the budget poll", {
+          fast_retries: maxThrowRetries,
+        });
+      }
+    }
+  }
+
+  return {
+    run: (mode) => attempt(mode, false),
+    cancel: clearRetry,
+  };
 }
 
 export interface PatchAccumulator {
@@ -192,6 +366,7 @@ async function main(): Promise<void> {
   let flushTimer: NodeJS.Timeout | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let budgetTimer: NodeJS.Timeout | null = null;
+  let telemetryEnsurer: TelemetryEnsurer | null = null;
 
   async function shutdown(): Promise<void> {
     if (shuttingDown) return;
@@ -201,6 +376,7 @@ async function main(): Promise<void> {
     if (flushTimer) clearInterval(flushTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (budgetTimer) clearInterval(budgetTimer);
+    telemetryEnsurer?.cancel();
     mqttSource?.stop();
     // Waits for any row flush already in flight, then flushes everything
     // still pending — rows AND the pending state patch — never dropping
@@ -278,16 +454,30 @@ async function main(): Promise<void> {
     },
   });
 
-  let telemetryManager: ReturnType<typeof TelemetryConfigManager> | null = null;
-  if (options.tailscale_enabled) {
+  // Hostname mode (telemetry_hostname set) registers through the local proxy
+  // without needing Tailscale at all, so it constructs the manager even when
+  // tailscale_enabled is false.
+  if (options.tailscale_enabled || options.telemetry_hostname) {
     const token = BridgeToken({ apiBase: options.garage_api_base, secret: options.bridge_secret });
-    telemetryManager = TelemetryConfigManager({
+    const telemetryManager = TelemetryConfigManager({
       proxyBase: "https://127.0.0.1:4443",
       vin: options.tesla_vin,
       token,
       sink,
       insecureTls: true,
     });
+    telemetryEnsurer = createTelemetryEnsurer({
+      manager: telemetryManager,
+      telemetryHostname: options.telemetry_hostname,
+      readFqdn: () => readFqdn(),
+      readCaPem,
+      readHostnameMarker,
+      log,
+      isStopping: () => stopping,
+    });
+    if (options.telemetry_hostname) {
+      log("info", "telemetry registration uses telemetry_hostname (private CA)", { hostname: options.telemetry_hostname });
+    }
   } else {
     log("info", "tailscale disabled: skipping telemetry config manager (dev/e2e)");
   }
@@ -295,16 +485,6 @@ async function main(): Promise<void> {
   async function flushTick(force: boolean): Promise<void> {
     await activeRowBatcher.flushIfDue(force ? Date.now() + FORCE_FLUSH_AHEAD_MS : Date.now());
     await activePatchAccumulator.flush();
-  }
-
-  function logEnsureResult(result: EnsureResult): void {
-    if (result.changed) {
-      log("info", "telemetry config ensure", { result });
-    } else if (ROUTINE_ENSURE_REASONS.has(result.reason)) {
-      log("debug", "telemetry config ensure skipped", { result });
-    } else {
-      log("warning", "telemetry config ensure not synced", { result });
-    }
   }
 
   async function runBudgetPoll(): Promise<void> {
@@ -315,26 +495,7 @@ async function main(): Promise<void> {
     }
     vehicle = resolved;
 
-    if (!telemetryManager) return;
-
-    let fqdn: string | null;
-    try {
-      fqdn = readFqdn();
-    } catch (err) {
-      fqdn = null;
-      log("debug", "tailnet FQDN not ready", { error: errMsg(err) });
-    }
-    const caPem = readCaPem();
-    if (!fqdn || !caPem) {
-      log("warning", "telemetry config skipped: tailnet FQDN or CA chain not ready yet");
-      return;
-    }
-    try {
-      const result = await telemetryManager.ensure(resolved.budgetMode as BudgetMode, { fqdn, caPem });
-      logEnsureResult(result);
-    } catch (err) {
-      log("error", "telemetry config ensure failed", { error: errMsg(err) });
-    }
+    await telemetryEnsurer?.run(resolved.budgetMode as BudgetMode);
   }
 
   flushTimer = setInterval(() => {

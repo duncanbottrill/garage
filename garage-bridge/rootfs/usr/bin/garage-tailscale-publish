@@ -2,14 +2,52 @@
 # Publishes the add-on's TCP ports through Tailscale Funnel/Serve.
 # Idempotent: `tailscale serve`/`funnel --bg` re-applying the same mapping
 # just confirms the existing config rather than erroring.
+#
+# Two modes:
+# - telemetry_hostname set: fleet-telemetry is reached at that public
+#   hostname through the router's port-forward (external 443 -> 8443), not
+#   through Tailscale, so the public 443 Funnel is NOT published; any 443
+#   serve/funnel mapping left from an earlier version is cleared
+#   (best-effort, errors ignored). The tailnet-only 4443 serve for the
+#   proxy is kept, and 8443 is served to the tailnet only (never Funnel) as
+#   a route for a relay host: behind CGNAT a port-forward cannot work, so a
+#   tailnet machine with a public address can forward public TCP 443 to
+#   <node>.<tailnet>.ts.net:8443 as raw TCP (SNI passthrough, no TLS
+#   termination). A failure to add that optional route is logged, not fatal.
+# - otherwise (fallback; Tesla does not accept a *.ts.net hostname for
+#   registration): 443 is published through Funnel to 127.0.0.1:8443 and
+#   4443 is served tailnet-only, as before.
 set -euo pipefail
 
 TS=(tailscale --socket=/run/tailscale/tailscaled.sock)
 
-"${TS[@]}" serve --bg --tcp=443 tcp://127.0.0.1:8443
+TELEMETRY_HOSTNAME=""
+if bashio::config.has_value 'telemetry_hostname'; then
+  # Only emptiness matters here (tlscert validates the name); the same
+  # whitespace trimming as tlscert/run and the ingest.
+  TELEMETRY_HOSTNAME="$(bashio::config 'telemetry_hostname' | tr -d '[:space:]')"
+fi
 
-if ! "${TS[@]}" funnel --bg 443 on; then
-  "${TS[@]}" funnel --bg --tcp=443 tcp://127.0.0.1:8443
+if [ -n "${TELEMETRY_HOSTNAME}" ]; then
+  bashio::log.info "tailscale: telemetry_hostname is set; not publishing 443 through Funnel (telemetry arrives via the router port-forward or a relay), serving 4443 and 8443 to the tailnet only"
+  "${TS[@]}" funnel --bg 443 off >/dev/null 2>&1 || true
+  "${TS[@]}" funnel --tcp=443 off >/dev/null 2>&1 || true
+  "${TS[@]}" serve --tcp=443 off >/dev/null 2>&1 || true
+  # Tailnet-only (serve, never funnel): the route a relay host forwards to.
+  if "${TS[@]}" serve --bg --tcp=8443 tcp://127.0.0.1:8443; then
+    bashio::log.info "tailscale: serving fleet-telemetry on tailnet TCP 8443 (tailnet only, for a relay host behind CGNAT; not Funnel)"
+  else
+    bashio::log.warning "tailscale: could not serve TCP 8443 to the tailnet; a relay host will not reach the receiver (the router port-forward is unaffected)"
+  fi
+else
+  bashio::log.info "tailscale: no telemetry_hostname; publishing 443 through Funnel to fleet-telemetry (fallback mode)"
+  # Clear a tailnet 8443 route left over from hostname mode (serve config persists).
+  "${TS[@]}" serve --tcp=8443 off >/dev/null 2>&1 || true
+  "${TS[@]}" serve --bg --tcp=443 tcp://127.0.0.1:8443
+
+  if ! "${TS[@]}" funnel --bg 443 on; then
+    "${TS[@]}" funnel --bg --tcp=443 tcp://127.0.0.1:8443
+  fi
 fi
 
 "${TS[@]}" serve --bg --tcp=4443 tcp://127.0.0.1:4443

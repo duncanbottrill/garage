@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.2.0
+
+Fixes Tesla rejecting the telemetry configuration with `hostname domain
+does not match with partner account`: the receiver now runs under a
+hostname in the partner domain instead of the Tailscale `*.ts.net` name.
+
+- New option `telemetry_hostname` (e.g. `telemetry.duncanbottrill.com`).
+  When set, the add-on creates its own private CA in `/data/ca` (P-256,
+  10 years) and serves fleet-telemetry with a 90-day certificate for that
+  name, renewed when under 30 days remain. Tesla trusts it through the
+  configuration's `ca` field, so no public certificate is needed.
+- The receiver (container port 8443/tcp) is published on the Green's port
+  443, so an IPv4 forward of external TCP 443 (to the Green's port 443)
+  and a direct IPv6 connection both work; the host port can be changed in
+  the add-on's Network section. In hostname mode the 443 Tailscale Funnel
+  is no longer published (an earlier mapping is cleared); the tailnet-only
+  4443 serve for the proxy stays, and 8443 is also served to the tailnet
+  only (never Funnel) as the route for a relay host when the home is
+  behind CGNAT. DOCS covers the CGNAT, relay and IPv6 routes.
+- The private CA re-issues the leaf when `server.key` does not match
+  `server.crt`, and re-creates the CA when `ca.key` does not match
+  `ca.pem`. The leaf has no CN (the name is in the SAN), so names longer
+  than 64 characters work.
+- `telemetry_hostname` is trimmed and lower-cased; any other character
+  outside `[a-z0-9.-]` (spaces inside the name included) is an error in
+  both tlscert (which idles) and the ingest (which exits at start).
+- The ingest registers `telemetry_hostname` with the private CA and no
+  longer waits for Tailscale in that mode. A registration attempt that
+  was skipped because the certificate was not ready yet, or that failed
+  with an error, is retried after 30 seconds instead of at the next
+  5-minute poll; after 5 failed fast retries in a row the 5-minute poll
+  takes over until an attempt gets through.
+- With `telemetry_hostname` empty everything behaves as in 0.1.0 (the
+  Funnel fallback, which Tesla does not accept for registration).
+
 ## 0.1.0
 
 First working release of the Garage Bridge add-on.
