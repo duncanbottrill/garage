@@ -11,8 +11,11 @@
 # Usage: TS_AUTHKEY=tskey-auth-... dev/funnel-smoke.sh
 #
 # The auth key is taken only from the TS_AUTHKEY environment variable. It
-# is written to a throwaway options file in the scratchpad (never inside
-# this repo) and never printed or logged by this script.
+# is written to a throwaway options file under $HOME/.garage-e2e-scratch
+# (never inside this repo) and never printed or logged by this script.
+# NOTE: this must live under $HOME, not /private/tmp or the session
+# scratchpad -- Colima (the Docker VM) does not mount /private/tmp, so a
+# bind-mount source there silently fails to appear inside the container.
 #
 # The real run scripts read their config via `bashio::config`, which talks
 # to the real Home Assistant Supervisor API (http://supervisor) — there is
@@ -26,7 +29,7 @@ set -euo pipefail
 : "${TS_AUTHKEY:?Set TS_AUTHKEY to a Tailscale auth key (see ~/.garage/vercel-secrets.env)}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH_DIR="/private/tmp/claude-501/-Users-duncanbottrill/39fa406e-49a3-4b11-ab98-0cd8cbd0ac10/scratchpad"
+SCRATCH_DIR="${HOME}/.garage-e2e-scratch"
 OPTIONS_FILE="${SCRATCH_DIR}/options.smoke.json"
 CONTAINER_NAME="garage-bridge-smoke"
 IMAGE_TAG="garage-bridge:dev"
