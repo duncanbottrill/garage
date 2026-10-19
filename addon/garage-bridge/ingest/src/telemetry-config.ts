@@ -334,9 +334,13 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
    * Builds the `Authorization` header fresh from `token.get()` on every
    * call (never reuses a header snapshot across multiple proxy calls). On a
    * 401, force-refreshes the bridge token once and retries that same call
-   * once; a second 401 after the forced refresh throws (a real auth
-   * problem, distinct from the bridge-token service being unavailable,
-   * which surfaces as `BridgeTokenError` instead).
+   * once. A second 401 after the forced refresh is NOT thrown: it's handed
+   * back to the caller like any other non-2xx response, so it flows through
+   * the normal error paths instead of escaping as an unhandled rejection —
+   * a POST's `!res.ok` branch stores `post 401: …` and starts the usual
+   * backoff, and a poll's caller treats it as not-synced (see `runPolls`).
+   * This is distinct from the bridge-token service itself being
+   * unavailable, which surfaces as `BridgeTokenError` instead.
    */
   async function callChecked(path: string, init: RequestInit): Promise<CallOutcome> {
     const baseHeaders = (init.headers as Record<string, string> | undefined) ?? {};
@@ -347,9 +351,6 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
     if (res.status === 401) {
       const refreshed = await opts.token.get({ force: true });
       res = await call(path, { ...init, headers: { ...baseHeaders, authorization: `Bearer ${refreshed.access_token}` } });
-      if (res.status === 401) {
-        throw new Error(`telemetry-config: unauthorized after forced token refresh (${path})`);
-      }
     }
 
     const text = await safeText(res);
@@ -357,14 +358,38 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
   }
 
   /**
+   * Advances `reg`'s poll schedule (doubling `pollDelayMs`, capped) using
+   * `clock()` — not the `now` the caller passed to `ensure()` — so a long
+   * run's own elapsed time can't eat into the next window. Always called
+   * BEFORE the corresponding `setTelemetryConfig` error write, so a failing
+   * Supabase write can never skip the backoff. Returns the fresh timestamp
+   * so callers that also need it (e.g. for `tokenRetryAtMs`) don't call
+   * `clock()` twice.
+   */
+  function scheduleNextPoll(): number {
+    const current = reg!; // the post-accepted branch always sets `reg` before polling
+    const freshNow = clock().getTime();
+    reg = {
+      ...current,
+      nextPollAt: freshNow + current.pollDelayMs,
+      pollDelayMs: Math.min(current.pollDelayMs * 2, MAX_POLL_DELAY_MS),
+    };
+    return freshNow;
+  }
+
+  /**
    * Runs up to `maxAttempts` polls, 15s apart, for `hash`. Confirms and
    * clears `reg` the moment a poll reports a trustworthy `synced: true`
-   * (see `configMatches`). If none confirm, updates `reg`'s poll schedule
-   * (doubling `pollDelayMs`, capped) using `clock()` — not the `now` the
-   * caller passed to `ensure()` — so a long run's own elapsed time can't
-   * eat into the next window. `isFirstRun` (the run immediately following
-   * an accepted POST, within the same `ensure()` call) also fetches
+   * (see `configMatches`). `isFirstRun` (the run immediately following an
+   * accepted POST, within the same `ensure()` call) also fetches
    * `fleet_telemetry_errors` once the attempts are exhausted.
+   *
+   * A poll that comes back 401 even after `callChecked`'s own forced-refresh
+   * retry means auth is genuinely broken, not just "not yet synced" — so the
+   * run stops immediately (burning the remaining attempts would only repeat
+   * the same failure) and, beyond the usual not-synced bookkeeping, sets
+   * `tokenRetryAtMs` so the *next* `ensure()` tick waits instead of
+   * hammering the proxy again right away.
    */
   async function runPolls(
     hash: string,
@@ -376,8 +401,15 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
   ): Promise<EnsureResult> {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const outcome = await callChecked(`/api/1/vehicles/${opts.vin}/fleet_telemetry_config`, {});
-      const payload = extractPayload(parseJsonSafe(outcome.text));
 
+      if (outcome.res.status === 401) {
+        const freshNow = scheduleNextPoll(); // reg updated before the error write (see scheduleNextPoll)
+        tokenRetryAtMs = freshNow + 5 * 60_000;
+        await opts.sink.setTelemetryConfig({ lastError: "auth:401" });
+        return { changed: false, reason: "not_synced" };
+      }
+
+      const payload = extractPayload(parseJsonSafe(outcome.text));
       if (outcome.res.ok && payload.synced === true && configMatches(payload.config, ctx.fqdn, fields)) {
         const confirmedAt = clock().toISOString();
         await opts.sink.setTelemetryConfig({ hash, version: (vehicle.configVersion ?? 0) + 1, confirmedAt, lastError: null });
@@ -391,16 +423,12 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
     if (isFirstRun) {
       const errOutcome = await callChecked(`/api/1/vehicles/${opts.vin}/fleet_telemetry_errors`, {});
       const message = firstErrorMessageFromText(errOutcome.text);
+      scheduleNextPoll(); // reg updated before the error write
       await opts.sink.setTelemetryConfig({ lastError: message });
+      return { changed: false, reason: "not_synced" };
     }
 
-    const current = reg!; // the post-accepted branch always sets `reg` before calling runPolls
-    const freshNow = clock().getTime();
-    reg = {
-      ...current,
-      nextPollAt: freshNow + current.pollDelayMs,
-      pollDelayMs: Math.min(current.pollDelayMs * 2, MAX_POLL_DELAY_MS),
-    };
+    scheduleNextPoll();
     return { changed: false, reason: "not_synced" };
   }
 
@@ -425,12 +453,17 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
       });
 
       if (!postOutcome.res.ok) {
+        // A double-401 (after callChecked's own forced-refresh retry) lands
+        // here too, now that callChecked never throws: it's just another
+        // non-2xx POST outcome, stored and backed off like any other.
         const postAttempts = (reg?.postAttempts ?? 0) + 1;
         const message = `post ${postOutcome.res.status}: ${postOutcome.text.slice(0, 300)}`;
-        await opts.sink.setTelemetryConfig({ lastError: message });
         const freshNow = clock().getTime();
         const nextPostAt = freshNow + Math.min(INITIAL_POST_BACKOFF_MS * 2 ** (postAttempts - 1), MAX_POST_BACKOFF_MS);
+        // reg (backoff state) is updated BEFORE the setTelemetryConfig write:
+        // a failing Supabase write must never be able to skip the backoff.
         reg = { hash, postAccepted: false, postAttempts, nextPostAt, nextPollAt: 0, pollDelayMs: 0 };
+        await opts.sink.setTelemetryConfig({ lastError: message });
         return { changed: false, reason: "post_failed" };
       }
 
@@ -472,9 +505,15 @@ export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
       return await runStateMachine(hash, fields, vehicle, mode, ctx, now);
     } catch (err) {
       if (err instanceof BridgeTokenError) {
+        // tokenRetryAtMs (backoff state) is set BEFORE the setTelemetryConfig
+        // write, for the same reason as the post/poll paths. The fallback
+        // uses clock(), not the `now` ensure() was entered with, and also
+        // covers a `retryAt` that fails Date.parse (NaN) — not just a
+        // missing one.
+        const parsedRetryAt = err.retryAt ? Date.parse(err.retryAt) : NaN;
+        tokenRetryAtMs = Number.isNaN(parsedRetryAt) ? clock().getTime() + 5 * 60_000 : parsedRetryAt;
         const message = `token:${err.code}`;
         await opts.sink.setTelemetryConfig({ lastError: message });
-        tokenRetryAtMs = err.retryAt ? Date.parse(err.retryAt) : now + 5 * 60_000;
         return { changed: false, reason: "token_error" };
       }
       throw err;

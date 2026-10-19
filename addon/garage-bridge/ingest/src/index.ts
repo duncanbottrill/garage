@@ -88,15 +88,19 @@ export interface PatchAccumulator {
  */
 export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: Health, log: Logger): PatchAccumulator {
   let pendingPatch: Record<string, unknown> = {};
+  // Tracks a `sink.mergeState` call already in flight, the same way
+  // `Batcher` tracks `flushingPromise` — so a shutdown-time flush() never
+  // starts a second, overlapping mergeState call alongside a periodic
+  // flush tick's own. Instead it waits for that call to finish, then
+  // merges whatever accumulated (or was left pending) in the meantime.
+  let flushingPromise: Promise<void> | null = null;
 
-  return {
-    merge(patch: Record<string, unknown>): void {
-      pendingPatch = mergePatch(pendingPatch, patch);
-    },
-    async flush(): Promise<void> {
-      if (Object.keys(pendingPatch).length === 0) return;
-      const patch = pendingPatch;
-      pendingPatch = {};
+  async function doFlush(): Promise<void> {
+    if (Object.keys(pendingPatch).length === 0) return;
+    const patch = pendingPatch;
+    pendingPatch = {};
+
+    const task = (async () => {
       try {
         await sink.mergeState(patch);
       } catch (err) {
@@ -107,6 +111,27 @@ export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: H
         health.patchFailed(err);
         log("error", "mergeState failed, dropping patch", { error: errMsg(err) });
       }
+    })();
+
+    flushingPromise = task;
+    try {
+      await task;
+    } finally {
+      // Only clear the pointer if it's still ours: guards against a later
+      // flush's in-flight marker ever being clobbered (mirrors Batcher).
+      if (flushingPromise === task) flushingPromise = null;
+    }
+  }
+
+  return {
+    merge(patch: Record<string, unknown>): void {
+      pendingPatch = mergePatch(pendingPatch, patch);
+    },
+    async flush(): Promise<void> {
+      if (flushingPromise) {
+        await flushingPromise.catch(() => {});
+      }
+      await doFlush();
     },
   };
 }
