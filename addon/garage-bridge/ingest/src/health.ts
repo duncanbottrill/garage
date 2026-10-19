@@ -7,6 +7,7 @@ export interface BridgeHealthPayload {
   connectivity: string | null;
   active_alerts: string[];
   last_error: string | null;
+  last_vehicle_error: string | null;
 }
 
 /**
@@ -23,6 +24,7 @@ export class Health {
   private connectivityStatus: string | null = null;
   private readonly activeAlerts = new Set<string>();
   private lastErrorMessage: string | null = null;
+  private lastVehicleErrorMessage: string | null = null;
 
   received(): void {
     this.receivedCount++;
@@ -32,13 +34,19 @@ export class Health {
     this.flushedCount += n;
   }
 
-  dropped(n: number): void {
-    this.droppedCount += n;
+  /** Sets the dropped-row count to the batcher's own cumulative total (not a delta). */
+  setDropped(n: number): void {
+    this.droppedCount = n;
   }
 
   patchFailed(err: unknown): void {
     this.patchFailureCount++;
     this.lastErrorMessage = err instanceof Error ? err.message : String(err);
+  }
+
+  /** Records a vehicle-reported `errors/<name>` event without counting it as a patch failure. */
+  vehicleError(name: string, body: string): void {
+    this.lastVehicleErrorMessage = `${name}: ${body}`;
   }
 
   connectivity(status: string): void {
@@ -64,6 +72,7 @@ export class Health {
       connectivity: this.connectivityStatus,
       active_alerts: Array.from(this.activeAlerts),
       last_error: this.lastErrorMessage,
+      last_vehicle_error: this.lastVehicleErrorMessage,
     };
   }
 }

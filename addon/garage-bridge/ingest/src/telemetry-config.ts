@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { Agent } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import type { BudgetMode } from "@garage/core";
 import type { ResolvedVehicle, Sink } from "./supabase-sink";
-import type { BridgeTokenClient } from "./bridge-token";
+import { BridgeTokenError, type BridgeTokenClient } from "./bridge-token";
 
 export interface FieldCadence {
   interval_seconds: number;
@@ -51,15 +51,20 @@ const NORMAL_CADENCE: CadenceTable = {
   SoftwareUpdateVersion: { interval_seconds: 3600 },
 };
 
+/**
+ * Scales `interval_seconds` by `factor` (min 1). `resend_interval_seconds` is
+ * deliberately left untouched by budget mode — it's a "re-send even if
+ * unchanged" ceiling, not a sampling rate, and scaling it out to multiple
+ * hours under `minimal` would mean a stuck door/gear/lock value could go
+ * that long without a confirming resend. `minimum_delta` is never scaled.
+ */
 function scaleCadence(table: CadenceTable, factor: number): CadenceTable {
   const out: CadenceTable = {};
   for (const [name, c] of Object.entries(table)) {
     out[name] = {
       interval_seconds: Math.max(1, c.interval_seconds * factor),
       ...(c.minimum_delta !== undefined ? { minimum_delta: c.minimum_delta } : {}),
-      ...(c.resend_interval_seconds !== undefined
-        ? { resend_interval_seconds: Math.max(1, c.resend_interval_seconds * factor) }
-        : {}),
+      ...(c.resend_interval_seconds !== undefined ? { resend_interval_seconds: c.resend_interval_seconds } : {}),
     };
   }
   return out;
@@ -67,9 +72,10 @@ function scaleCadence(table: CadenceTable, factor: number): CadenceTable {
 
 /**
  * The field cadence table for a budget mode: `normal` as specified, `reduced`
- * triples every interval/resend (min 1), `minimal` sextuples them and drops
+ * triples every interval (min 1), `minimal` sextuples them and drops
  * `VehicleSpeed` (its `Location` lands on 60 — the plan's explicit override —
  * purely because 10 * 6 == 60, with no extra special-casing needed).
+ * `resend_interval_seconds` is never scaled (see `scaleCadence`).
  */
 export function cadenceFields(mode: BudgetMode): CadenceTable {
   if (mode === "normal") return { ...NORMAL_CADENCE };
@@ -97,6 +103,7 @@ export interface TelemetryConfigBody {
 }
 
 const CONFIG_TTL_SECONDS = 180 * 24 * 3600;
+const CONFIRM_STALE_MS = 150 * 24 * 3600 * 1000;
 
 export function desiredConfig({ fqdn, caPem, mode, now = new Date() }: DesiredConfigInput): TelemetryConfigBody {
   return {
@@ -109,9 +116,23 @@ export function desiredConfig({ fqdn, caPem, mode, now = new Date() }: DesiredCo
   };
 }
 
-/** sha256 hex of the canonical (recursively key-sorted) JSON of `fields`. */
-export function configHash(fields: unknown): string {
-  return createHash("sha256").update(canonicalJson(fields)).digest("hex");
+export interface ConfigHashInput {
+  hostname: string;
+  caPem: string;
+  fields: unknown;
+}
+
+/**
+ * sha256 hex of the canonical (recursively key-sorted) JSON of
+ * `{ hostname, ca_sha256, fields }`. Hashing the hostname and a hash of the
+ * CA chain alongside the cadence fields means a tailnet FQDN change or a
+ * rotated CA — not just a cadence/budget-mode change — also re-registers.
+ */
+export function configHash(input: ConfigHashInput): string {
+  const ca_sha256 = createHash("sha256").update(input.caPem).digest("hex");
+  return createHash("sha256")
+    .update(canonicalJson({ hostname: input.hostname, ca_sha256, fields: input.fields }))
+    .digest("hex");
 }
 
 function canonicalJson(value: unknown): string {
@@ -124,6 +145,14 @@ function canonicalJson(value: unknown): string {
   return `{${entries.join(",")}}`;
 }
 
+/** True when `confirmedAt` is missing or older than 150 days (the config's `exp` is 180 days). */
+function isConfirmationStale(confirmedAt: string | null | undefined, now: Date): boolean {
+  if (!confirmedAt) return true;
+  const confirmedMs = new Date(confirmedAt).getTime();
+  if (Number.isNaN(confirmedMs)) return true;
+  return now.getTime() - confirmedMs > CONFIRM_STALE_MS;
+}
+
 export interface TelemetryConfigManagerOptions {
   proxyBase: string;
   vin: string;
@@ -132,83 +161,60 @@ export interface TelemetryConfigManagerOptions {
   fetch?: typeof fetch;
   insecureTls?: boolean;
   sleep?: (ms: number) => Promise<void>;
+  /** Clock used to stamp `confirmedAt`; defaults to `() => new Date()`. Overridable for tests. */
+  clock?: () => Date;
 }
 
 export type EnsureResult =
   | { changed: false }
   | { changed: true; synced: true }
-  | { changed: true; synced: false; error: string };
+  | { changed: true; synced: false; error: string }
+  | { skipped: "in_flight" };
 
 const POLL_INTERVAL_MS = 15_000;
 const POLL_TIMEOUT_MS = 10 * 60_000;
 const MAX_POLL_ATTEMPTS = Math.ceil(POLL_TIMEOUT_MS / POLL_INTERVAL_MS);
+const BACKOFF_POLL_ATTEMPTS = 4;
+const INITIAL_BACKOFF_MS = 15 * 60_000;
+const MAX_BACKOFF_MS = 6 * 3600_000;
 
-/**
- * Registers and confirms the Fleet Telemetry config through the local
- * `tesla-http-proxy`. Never calls Tesla directly, never logs the bearer
- * token, and counts every proxy round trip (`fleet_telemetry_config` POST,
- * its confirmation polls, and an error fetch) as one `data` usage unit each
- * — Tesla bills these as data requests, not commands.
- */
-export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
-  const fetchImpl = opts.fetch ?? globalThis.fetch;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const dispatcher = opts.insecureTls ? new Agent({ connect: { rejectUnauthorized: false } }) : undefined;
-
-  async function call(path: string, init: RequestInit): Promise<Response> {
-    const res = await fetchImpl(`${opts.proxyBase}${path}`, dispatcher ? ({ ...init, dispatcher } as RequestInit) : init);
-    await opts.sink.countUsage("data", 1);
-    return res;
-  }
-
-  async function ensure(mode: BudgetMode, ctx: { fqdn: string; caPem: string }, now: Date = new Date()): Promise<EnsureResult> {
-    const vehicle: ResolvedVehicle | null = await opts.sink.resolveVehicle(opts.vin);
-    if (!vehicle) throw new Error(`telemetry-config: vehicle ${opts.vin} not found`);
-
-    const fields = cadenceFields(mode);
-    const newHash = configHash(fields);
-    if (vehicle.configHash === newHash) {
-      return { changed: false };
-    }
-
-    const config = desiredConfig({ fqdn: ctx.fqdn, caPem: ctx.caPem, mode, now });
-    const { access_token } = await opts.token.get();
-    const authHeaders = { authorization: `Bearer ${access_token}`, "content-type": "application/json" };
-
-    await call("/api/1/vehicles/fleet_telemetry_config", {
-      method: "POST",
-      headers: authHeaders,
-      body: JSON.stringify({ vins: [opts.vin], config }),
-    });
-
-    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-      const res = await call(`/api/1/vehicles/${opts.vin}/fleet_telemetry_config`, { headers: authHeaders });
-      const body = await safeJson(res);
-      const payload = (body.response as Record<string, unknown> | undefined) ?? body;
-      if (payload.synced === true) {
-        await opts.sink.setTelemetryConfig({
-          hash: newHash,
-          version: (vehicle.configVersion ?? 0) + 1,
-          confirmedAt: now.toISOString(),
-          lastError: null,
-        });
-        return { changed: true, synced: true };
-      }
-      if (attempt < MAX_POLL_ATTEMPTS - 1) await sleep(POLL_INTERVAL_MS);
-    }
-
-    const errRes = await call(`/api/1/vehicles/${opts.vin}/fleet_telemetry_errors`, { headers: authHeaders });
-    const message = await firstErrorMessage(errRes);
-    await opts.sink.setTelemetryConfig({ lastError: message });
-    return { changed: true, synced: false, error: message };
-  }
-
-  return { ensure };
+interface BackoffState {
+  hash: string;
+  delayMs: number;
+  until: number;
 }
 
-async function firstErrorMessage(res: Response): Promise<string> {
-  const body = await safeJson(res);
-  const payload = (body.response as Record<string, unknown> | undefined) ?? body;
+interface CallOutcome {
+  res: Response;
+  text: string;
+}
+
+function assertInsecureTlsAllowed(proxyBase: string): void {
+  let host: string;
+  try {
+    host = new URL(proxyBase).hostname;
+  } catch {
+    throw new Error(`telemetry-config: invalid proxyBase ${JSON.stringify(proxyBase)}`);
+  }
+  if (host !== "127.0.0.1" && host !== "localhost") {
+    throw new Error(`telemetry-config: insecureTls may only be used with a proxyBase on 127.0.0.1 or localhost (got ${host})`);
+  }
+}
+
+function parseJsonSafe(text: string): Record<string, unknown> {
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function extractPayload(body: Record<string, unknown>): Record<string, unknown> {
+  return (body.response as Record<string, unknown> | undefined) ?? body;
+}
+
+function firstErrorMessageFromText(text: string): string {
+  const payload = extractPayload(parseJsonSafe(text));
   const errors = payload.fleet_telemetry_errors;
   if (Array.isArray(errors) && errors.length > 0) {
     const first = errors[0] as Record<string, unknown>;
@@ -216,13 +222,195 @@ async function firstErrorMessage(res: Response): Promise<string> {
       return `${first.name}: ${first.body ?? ""}`.slice(0, 500);
     }
   }
-  return JSON.stringify(body).slice(0, 500);
+  return text.slice(0, 500);
 }
 
-async function safeJson(res: Response): Promise<Record<string, unknown>> {
+/**
+ * Registers and confirms the Fleet Telemetry config through the local
+ * `tesla-http-proxy`. Never calls Tesla directly, never logs the bearer
+ * token, and counts every proxy round trip (POST, every poll, and an error
+ * fetch) as one `data` usage unit each — Tesla bills these as data requests,
+ * not commands.
+ *
+ * Bounded and non-overlapping: `ensure()` refuses to run a second attempt
+ * while one is already in flight, and after a failure it backs off (15min,
+ * doubling to a 6h cap, reset on success) before POSTing the same config
+ * hash again — while backed off, a call only re-checks sync status with a
+ * handful of bounded GETs instead of re-registering.
+ */
+export function TelemetryConfigManager(opts: TelemetryConfigManagerOptions) {
+  if (opts.insecureTls) assertInsecureTlsAllowed(opts.proxyBase);
+
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const clock = opts.clock ?? (() => new Date());
+  const dispatcher = opts.insecureTls ? new Agent({ connect: { rejectUnauthorized: false } }) : undefined;
+  // Never pass a dispatcher to globalThis.fetch: only undici's own fetch
+  // export accepts one reliably. opts.fetch (test injection) always wins
+  // when provided; in production, insecureTls selects undici's fetch.
+  const fetchImpl = opts.fetch ?? (opts.insecureTls ? (undiciFetch as unknown as typeof fetch) : globalThis.fetch);
+
+  let inFlight = false;
+  let backoff: BackoffState | null = null;
+  let tokenRetryAtMs: number | null = null;
+
+  async function call(path: string, init: RequestInit): Promise<Response> {
+    const res = dispatcher
+      ? await fetchImpl(`${opts.proxyBase}${path}`, { ...init, dispatcher } as RequestInit)
+      : await fetchImpl(`${opts.proxyBase}${path}`, init);
+    await opts.sink.countUsage("data", 1);
+    return res;
+  }
+
+  /** Calls `path`; on a 401, force-refreshes the bridge token once and retries that same call once. */
+  async function callChecked(path: string, init: RequestInit): Promise<CallOutcome> {
+    let res = await call(path, init);
+    if (res.status === 401) {
+      const fresh = await opts.token.get({ force: true });
+      const headers = { ...(init.headers as Record<string, string>), authorization: `Bearer ${fresh.access_token}` };
+      res = await call(path, { ...init, headers });
+    }
+    const text = await safeText(res);
+    return { res, text };
+  }
+
+  function enterBackoff(hash: string, now: Date): void {
+    const nowMs = now.getTime();
+    if (backoff && backoff.hash === hash) {
+      const delayMs = Math.min(backoff.delayMs * 2, MAX_BACKOFF_MS);
+      backoff = { hash, delayMs, until: nowMs + delayMs };
+    } else {
+      backoff = { hash, delayMs: INITIAL_BACKOFF_MS, until: nowMs + INITIAL_BACKOFF_MS };
+    }
+  }
+
+  async function authHeaders(): Promise<Record<string, string>> {
+    const { access_token } = await opts.token.get();
+    return { authorization: `Bearer ${access_token}`, "content-type": "application/json" };
+  }
+
+  /** While backed off for `hash`: only re-checks sync status, bounded to 4 GETs 15s apart. */
+  async function pollOnly(hash: string, vehicle: ResolvedVehicle, now: Date): Promise<EnsureResult> {
+    const headers = await authHeaders();
+
+    for (let attempt = 0; attempt < BACKOFF_POLL_ATTEMPTS; attempt++) {
+      const outcome = await callChecked(`/api/1/vehicles/${opts.vin}/fleet_telemetry_config`, { headers });
+      if (!outcome.res.ok) {
+        const message = `poll ${outcome.res.status}: ${outcome.text.slice(0, 300)}`;
+        await opts.sink.setTelemetryConfig({ lastError: message });
+        enterBackoff(hash, now);
+        return { changed: true, synced: false, error: message };
+      }
+
+      const payload = extractPayload(parseJsonSafe(outcome.text));
+      if (payload.synced === true) {
+        const confirmedAt = clock().toISOString();
+        await opts.sink.setTelemetryConfig({ hash, version: (vehicle.configVersion ?? 0) + 1, confirmedAt, lastError: null });
+        backoff = null;
+        return { changed: true, synced: true };
+      }
+
+      if (attempt < BACKOFF_POLL_ATTEMPTS - 1) await sleep(POLL_INTERVAL_MS);
+    }
+
+    enterBackoff(hash, now);
+    return { changed: true, synced: false, error: "not yet synced (within backoff window)" };
+  }
+
+  async function registerAndPoll(hash: string, vehicle: ResolvedVehicle, mode: BudgetMode, ctx: { fqdn: string; caPem: string }, now: Date): Promise<EnsureResult> {
+    const config = desiredConfig({ fqdn: ctx.fqdn, caPem: ctx.caPem, mode, now });
+    const headers = await authHeaders();
+
+    const postOutcome = await callChecked("/api/1/vehicles/fleet_telemetry_config", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ vins: [opts.vin], config }),
+    });
+
+    if (!postOutcome.res.ok) {
+      const message = `post ${postOutcome.res.status}: ${postOutcome.text.slice(0, 300)}`;
+      await opts.sink.setTelemetryConfig({ lastError: message });
+      enterBackoff(hash, now);
+      return { changed: true, synced: false, error: message };
+    }
+
+    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
+      const pollOutcome = await callChecked(`/api/1/vehicles/${opts.vin}/fleet_telemetry_config`, { headers });
+      if (!pollOutcome.res.ok) {
+        const message = `poll ${pollOutcome.res.status}: ${pollOutcome.text.slice(0, 300)}`;
+        await opts.sink.setTelemetryConfig({ lastError: message });
+        enterBackoff(hash, now);
+        return { changed: true, synced: false, error: message };
+      }
+
+      const payload = extractPayload(parseJsonSafe(pollOutcome.text));
+      if (payload.synced === true) {
+        const confirmedAt = clock().toISOString();
+        await opts.sink.setTelemetryConfig({ hash, version: (vehicle.configVersion ?? 0) + 1, confirmedAt, lastError: null });
+        backoff = null;
+        return { changed: true, synced: true };
+      }
+      if (attempt < MAX_POLL_ATTEMPTS - 1) await sleep(POLL_INTERVAL_MS);
+    }
+
+    const errOutcome = await callChecked(`/api/1/vehicles/${opts.vin}/fleet_telemetry_errors`, { headers });
+    const message = firstErrorMessageFromText(errOutcome.text);
+    await opts.sink.setTelemetryConfig({ lastError: message });
+    enterBackoff(hash, now);
+    return { changed: true, synced: false, error: message };
+  }
+
+  async function ensureInner(mode: BudgetMode, ctx: { fqdn: string; caPem: string }, now: Date): Promise<EnsureResult> {
+    if (tokenRetryAtMs !== null) {
+      if (now.getTime() < tokenRetryAtMs) {
+        return { changed: true, synced: false, error: "token: waiting for retryAt" };
+      }
+      tokenRetryAtMs = null; // the window has passed; allow a fresh attempt
+    }
+
+    const vehicle: ResolvedVehicle | null = await opts.sink.resolveVehicle(opts.vin);
+    if (!vehicle) throw new Error(`telemetry-config: vehicle ${opts.vin} not found`);
+
+    const fields = cadenceFields(mode);
+    const newHash = configHash({ hostname: ctx.fqdn, caPem: ctx.caPem, fields });
+
+    if (vehicle.configHash === newHash && !isConfirmationStale(vehicle.confirmedAt, now)) {
+      return { changed: false };
+    }
+
+    if (backoff && backoff.hash === newHash && now.getTime() < backoff.until) {
+      return await pollOnly(newHash, vehicle, now);
+    }
+
+    try {
+      return await registerAndPoll(newHash, vehicle, mode, ctx, now);
+    } catch (err) {
+      if (err instanceof BridgeTokenError) {
+        const message = `token:${err.code}`;
+        await opts.sink.setTelemetryConfig({ lastError: message });
+        tokenRetryAtMs = err.retryAt ? new Date(err.retryAt).getTime() : null;
+        return { changed: true, synced: false, error: message };
+      }
+      throw err;
+    }
+  }
+
+  async function ensure(mode: BudgetMode, ctx: { fqdn: string; caPem: string }, now: Date = new Date()): Promise<EnsureResult> {
+    if (inFlight) return { skipped: "in_flight" };
+    inFlight = true;
+    try {
+      return await ensureInner(mode, ctx, now);
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  return { ensure };
+}
+
+async function safeText(res: Response): Promise<string> {
   try {
-    return (await res.json()) as Record<string, unknown>;
+    return await res.text();
   } catch {
-    return {};
+    return "";
   }
 }

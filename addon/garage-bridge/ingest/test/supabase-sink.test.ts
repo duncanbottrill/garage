@@ -130,6 +130,7 @@ describe("SupabaseSink", () => {
     expect(resolved!.vehicleId).toBe(vehicleId);
     expect(resolved!.ownerId).toBe(ownerId);
     expect(resolved!.budgetMode).toBe("normal");
+    expect(resolved!.confirmedAt).toBeNull();
 
     // Now bound to the real ids, not the placeholder.
     await expect(sink.ensureStateRow()).resolves.not.toThrow();

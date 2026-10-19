@@ -118,4 +118,52 @@ describe("Batcher", () => {
     await batcher.flushIfDue(t0 + 1_000_000);
     expect(batcher.stats()).toEqual({ pending: 0, dropped: 0, flushed: 4 });
   });
+
+  it("flush() flushes everything pending regardless of maxRows/maxAgeMs", async () => {
+    const onFlush = vi.fn().mockResolvedValue(undefined);
+    const batcher = new Batcher<number>({ maxRows: 200, maxAgeMs: 2000, onFlush });
+
+    batcher.push(1);
+    batcher.push(2);
+
+    await batcher.flush();
+
+    expect(onFlush).toHaveBeenCalledTimes(1);
+    expect(onFlush.mock.calls[0]![0]).toEqual([1, 2]);
+    expect(batcher.stats()).toEqual({ pending: 0, dropped: 0, flushed: 2 });
+  });
+
+  it("flush() is a no-op when the buffer is empty", async () => {
+    const onFlush = vi.fn().mockResolvedValue(undefined);
+    const batcher = new Batcher<number>({ onFlush });
+
+    await batcher.flush();
+
+    expect(onFlush).not.toHaveBeenCalled();
+  });
+
+  it("flush() waits for an in-flight flushIfDue flush before running its own", async () => {
+    let resolveFirst: (() => void) | undefined;
+    const firstFlush = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const onFlush = vi.fn().mockImplementationOnce(() => firstFlush).mockResolvedValueOnce(undefined);
+    const batcher = new Batcher<number>({ maxRows: 1, maxAgeMs: 2000, onFlush });
+
+    batcher.push(1);
+    const flushIfDuePromise = batcher.flushIfDue(); // buffer at maxRows: starts flushing [1], onFlush pending
+
+    batcher.push(2); // pushed while the first flush is still in flight
+
+    const flushPromise = batcher.flush(); // must wait for the in-flight flush, then flush [2]
+    resolveFirst?.();
+
+    await flushIfDuePromise;
+    await flushPromise;
+
+    expect(onFlush).toHaveBeenCalledTimes(2);
+    expect(onFlush.mock.calls[0]![0]).toEqual([1]);
+    expect(onFlush.mock.calls[1]![0]).toEqual([2]);
+    expect(batcher.stats()).toEqual({ pending: 0, dropped: 0, flushed: 2 });
+  });
 });

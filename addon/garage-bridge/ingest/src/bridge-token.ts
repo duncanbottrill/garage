@@ -23,24 +23,33 @@ export interface BridgeTokenOptions {
   fetch?: typeof fetch;
 }
 
+export interface BridgeTokenGetOptions {
+  /** Clock override for cache-TTL comparisons; defaults to `Date.now()`. */
+  now?: number;
+  /** Bypasses the cache and re-fetches even if the cached token is still fresh. */
+  force?: boolean;
+}
+
 export interface BridgeTokenClient {
-  get(now?: number): Promise<BridgeTokenResult>;
+  get(opts?: BridgeTokenGetOptions): Promise<BridgeTokenResult>;
 }
 
 const REFRESH_MARGIN_MS = 60_000;
 
 /**
  * Client for `GET <garage_api_base>/api/bridge/token`. Caches the token until
- * 60s before its `expires_at`, then re-fetches. Never logs the secret or the
- * token. Non-200 responses throw `BridgeTokenError` carrying the server's
- * `error` code (and `retry_at` for 503s).
+ * 60s before its `expires_at`, then re-fetches (or immediately on `force`).
+ * Never logs the secret or the token. Non-200 responses throw
+ * `BridgeTokenError` carrying the server's `error` code (and `retry_at` for
+ * 503s).
  */
 export function BridgeToken(opts: BridgeTokenOptions): BridgeTokenClient {
   const fetchImpl = opts.fetch ?? globalThis.fetch;
   let cached: { result: BridgeTokenResult; expiresAtMs: number } | null = null;
 
-  async function get(now: number = Date.now()): Promise<BridgeTokenResult> {
-    if (cached && cached.expiresAtMs - REFRESH_MARGIN_MS > now) {
+  async function get(getOpts: BridgeTokenGetOptions = {}): Promise<BridgeTokenResult> {
+    const now = getOpts.now ?? Date.now();
+    if (!getOpts.force && cached && cached.expiresAtMs - REFRESH_MARGIN_MS > now) {
       return cached.result;
     }
 

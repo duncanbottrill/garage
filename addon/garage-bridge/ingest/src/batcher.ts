@@ -20,7 +20,9 @@ interface Entry<T> {
  * Accumulates items with a push timestamp and flushes them in batches.
  * Pure/in-memory: no timers, no I/O — the caller decides when to call
  * `flushIfDue` (e.g. on every MQTT message and on a periodic tick) and
- * supplies `onFlush` to actually persist the batch.
+ * supplies `onFlush` to actually persist the batch. `flush()` is the
+ * shutdown-time escape hatch: it waits for any flush already in flight and
+ * then flushes everything pending, ignoring the maxRows/maxAgeMs due-checks.
  */
 export class Batcher<T> {
   private buffer: Entry<T>[] = [];
@@ -31,7 +33,7 @@ export class Batcher<T> {
 
   private flushedCount = 0;
   private droppedCount = 0;
-  private flushing = false;
+  private flushingPromise: Promise<void> | null = null;
 
   constructor(opts: BatcherOptions<T>) {
     this.maxRows = opts.maxRows ?? 200;
@@ -54,26 +56,51 @@ export class Batcher<T> {
   async flushIfDue(now: number = Date.now()): Promise<void> {
     this.dropStale(now);
 
-    if (this.flushing) return;
+    if (this.flushingPromise) return;
     if (this.buffer.length === 0) return;
     if (!this.isDue(now)) return;
 
-    const batch = this.buffer;
-    this.buffer = [];
-    this.flushing = true;
-    try {
-      await this.onFlush(batch.map((e) => e.item));
-      this.flushedCount += batch.length;
-    } catch {
-      this.buffer = batch.concat(this.buffer);
-      this.dropStale(now);
-    } finally {
-      this.flushing = false;
+    await this.runFlush(now);
+  }
+
+  /**
+   * Forces a flush of everything currently pending, regardless of
+   * maxRows/maxAgeMs. Waits for a flush already in flight (from a concurrent
+   * `flushIfDue` tick) to finish first, so a shutdown-time flush never races
+   * a periodic one — it simply runs right after.
+   */
+  async flush(): Promise<void> {
+    if (this.flushingPromise) {
+      await this.flushingPromise.catch(() => {});
     }
+    if (this.buffer.length === 0) return;
+    await this.runFlush();
   }
 
   stats(): BatcherStats {
     return { pending: this.buffer.length, dropped: this.droppedCount, flushed: this.flushedCount };
+  }
+
+  private async runFlush(dropStaleAt?: number): Promise<void> {
+    const batch = this.buffer;
+    this.buffer = [];
+
+    const task = (async () => {
+      try {
+        await this.onFlush(batch.map((e) => e.item));
+        this.flushedCount += batch.length;
+      } catch {
+        this.buffer = batch.concat(this.buffer);
+        if (dropStaleAt !== undefined) this.dropStale(dropStaleAt);
+      }
+    })();
+
+    this.flushingPromise = task;
+    try {
+      await task;
+    } finally {
+      this.flushingPromise = null;
+    }
   }
 
   private isDue(now: number): boolean {

@@ -13,6 +13,7 @@ export interface ResolvedVehicle {
   budgetMode: string;
   configHash: string | null;
   configVersion: number;
+  confirmedAt: string | null;
 }
 
 export interface TelemetryConfigFields {
@@ -82,7 +83,7 @@ export function SupabaseSink(client: SupabaseClient, initial: SupabaseSinkOption
   async function resolveVehicle(vin: string): Promise<ResolvedVehicle | null> {
     const { data, error } = await client
       .from("vehicles")
-      .select("id, owner_id, budget_mode, telemetry_config_hash, telemetry_config_version")
+      .select("id, owner_id, budget_mode, telemetry_config_hash, telemetry_config_version, telemetry_confirmed_at")
       .eq("vin", vin)
       .maybeSingle();
     if (error) throw error;
@@ -97,6 +98,7 @@ export function SupabaseSink(client: SupabaseClient, initial: SupabaseSinkOption
       budgetMode: data.budget_mode,
       configHash: data.telemetry_config_hash,
       configVersion: data.telemetry_config_version,
+      confirmedAt: data.telemetry_confirmed_at,
     };
   }
 
