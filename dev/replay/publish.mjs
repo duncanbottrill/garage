@@ -4,18 +4,16 @@
 // dev/e2e-bridge.sh, with every fixture's VIN swapped to the e2e harness
 // VIN, spread over ~REPLAY_DURATION_MS, QoS 1.
 //
-// Finishes with one extra message: a plain `"CONNECTED"` string payload on
-// `<base>/<vin>/connectivity`. This is deliberately NOT the same shape as
-// the fixtures' own `connectivity-connected` sample (a 3-key
-// `{ConnectionId,Status,CreatedAt}` object) — ingest's decode.ts only
-// unwraps single-key `{...Value: x}` wrapper objects; a multi-key object
-// like the fixture's is passed through unchanged, so mqtt-source.ts's
-// `String(value)` on it never reads "CONNECTED" and sleep_state is never
-// set to "online" by that fixture alone. The bare string this script sends
-// last is what actually proves sleep_state -> "online" end to end. (It
-// also happens to run after `connectivity-disconnected`, which — if it did
-// decode to a status, which it doesn't for the same reason — would
-// otherwise have been the last connectivity write.)
+// Finishes with one extra message: a Tesla-shaped connectivity object
+// (`{ConnectionId,Status,CreatedAt}`, same shape as the fixtures' own
+// `connectivity-connected`/`connectivity-disconnected` samples — the real
+// fleet-telemetry dispatcher payload, not a bare string) with
+// `Status: "CONNECTED"` on `<base>/<vin>/connectivity`. `decode.ts`'s
+// `toBridgeEvent` reads `Status` off that object (uppercased; a bare status
+// string is still accepted too), so this proves sleep_state -> "online" via
+// the real payload shape end to end. It also happens to run after
+// `connectivity-disconnected`, which would otherwise have been the last
+// connectivity write.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -51,7 +49,11 @@ async function main() {
   messages.push({
     id: "replay-final-connectivity-connected",
     topic: `garage/${VIN}/connectivity`,
-    payload: JSON.stringify("CONNECTED"),
+    payload: JSON.stringify({
+      ConnectionId: "replay-final",
+      Status: "CONNECTED",
+      CreatedAt: new Date().toISOString(),
+    }),
   });
 
   console.log(`[replay] connecting to ${MQTT_URL}`);

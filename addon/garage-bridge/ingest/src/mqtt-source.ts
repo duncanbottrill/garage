@@ -1,5 +1,5 @@
 import mqtt, { type MqttClient } from "mqtt";
-import { decodePayload, parseTopic, type ParsedTopic } from "./decode";
+import { toBridgeEvent } from "./decode";
 import type { BridgeEvent } from "./state";
 
 export type MqttStatus = "connecting" | "connected" | "reconnecting" | "offline" | "error";
@@ -61,12 +61,8 @@ export function startMqttSource(opts: MqttSourceOptions): MqttSource {
 
   client.on("message", (receivedTopic, payload) => {
     try {
-      const parsed = parseTopic(receivedTopic, opts.base);
-      if (!parsed || parsed.vin !== opts.vin) return;
-
-      const value = decodePayload(payload);
-      const ev = toBridgeEvent(parsed, value, new Date());
-      if (ev) opts.onEvent(ev);
+      const ev = toBridgeEvent(receivedTopic, payload, opts.base, new Date());
+      if (ev && ev.vin === opts.vin) opts.onEvent(ev);
     } catch (err) {
       opts.onStatus?.("error", err);
     }
@@ -77,36 +73,4 @@ export function startMqttSource(opts: MqttSourceOptions): MqttSource {
       client.end(true);
     },
   };
-}
-
-function toBridgeEvent(parsed: ParsedTopic, value: unknown, at: Date): BridgeEvent | null {
-  const { vin, section, rest } = parsed;
-
-  switch (section) {
-    case "v": {
-      const name = rest[0];
-      if (!name) return null;
-      return { kind: "field", vin, name, value, at };
-    }
-    case "connectivity": {
-      const status = typeof value === "string" ? value : String(value);
-      const normalized = status === "CONNECTED" || status === "DISCONNECTED" ? status : "UNKNOWN";
-      return { kind: "connectivity", vin, status: normalized, at };
-    }
-    case "alerts": {
-      // garage/<VIN>/alerts/<name>/current
-      const name = rest[0];
-      if (!name) return null;
-      const active = value === true || value === "true" || value === 1;
-      return { kind: "alert", vin, name, active, at };
-    }
-    case "errors": {
-      const name = rest[0];
-      if (!name) return null;
-      const body = typeof value === "string" ? value : JSON.stringify(value);
-      return { kind: "error", vin, name, body, at };
-    }
-    default:
-      return null;
-  }
 }

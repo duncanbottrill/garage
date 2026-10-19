@@ -17,5 +17,7 @@
   { "id": "connectivity-connected", "topic": "garage/XP7YGCEL9PB123456/connectivity", "payload": "{\"ConnectionId\":\"abc\",\"Status\":\"CONNECTED\",\"CreatedAt\":\"2026-10-19T08:00:00Z\"}" },
   { "id": "connectivity-disconnected", "topic": "garage/XP7YGCEL9PB123456/connectivity", "payload": "{\"ConnectionId\":\"def\",\"Status\":\"DISCONNECTED\",\"CreatedAt\":\"2026-10-19T08:05:00Z\"}" },
   { "id": "alert-service-required", "topic": "garage/XP7YGCEL9PB123456/alerts/Service_Required/current", "payload": "{\"Name\":\"Service_Required\",\"StartedAt\":\"2026-10-19T07:00:00Z\",\"EndedAt\":null,\"Audiences\":[\"Service\"]}" },
-  { "id": "error-some-error", "topic": "garage/XP7YGCEL9PB123456/errors/SomeError", "payload": "{\"Name\":\"SomeError\",\"Body\":\"detail\",\"Tags\":{},\"CreatedAt\":\"2026-10-19T07:30:00Z\"}" }
+  { "id": "alert-service-required-cleared", "topic": "garage/XP7YGCEL9PB123456/alerts/Service_Required/current", "payload": "{\"Name\":\"Service_Required\",\"StartedAt\":\"2026-10-19T07:00:00Z\",\"EndedAt\":\"2026-10-19T07:45:00Z\",\"Audiences\":[\"Service\"]}" },
+  { "id": "error-some-error", "topic": "garage/XP7YGCEL9PB123456/errors/SomeError", "payload": "{\"Name\":\"SomeError\",\"Body\":\"detail\",\"Tags\":{},\"CreatedAt\":\"2026-10-19T07:30:00Z\"}" },
+  { "id": "connectivity-malformed", "topic": "garage/XP7YGCEL9PB123456/connectivity", "payload": "42" }
 ]
