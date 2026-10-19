@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_DIR="${REPO_ROOT}/dev"
 COMPOSE_FILE="${DEV_DIR}/compose.bridge.yaml"
 OPTIONS_TEMPLATE="${DEV_DIR}/options.e2e.json"
-FIXTURES_PATH="${REPO_ROOT}/addon/garage-bridge/ingest/test/fixtures/mqtt-samples.json"
+FIXTURES_PATH="${REPO_ROOT}/garage-bridge/ingest/test/fixtures/mqtt-samples.json"
 
 SCRATCH_DIR="${HOME}/.garage-e2e-scratch"
 RESOLVED_OPTIONS_FILE="${SCRATCH_DIR}/options.e2e.resolved.json"
@@ -84,7 +84,7 @@ bash "${DEV_DIR}/make-dev-tls.sh"
 echo "==== building ${IMAGE_TAG} ===="
 docker build \
   --build-arg BUILD_FROM=ghcr.io/home-assistant/aarch64-base-debian:bookworm \
-  -f "${REPO_ROOT}/addon/garage-bridge/Dockerfile" \
+  -f "${REPO_ROOT}/garage-bridge/Dockerfile" \
   -t "${IMAGE_TAG}" \
   "${REPO_ROOT}"
 

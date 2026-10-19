@@ -62,7 +62,7 @@ mkdir -p "${SCRATCH_DIR}"
 echo "==== build ===="
 docker build \
   --build-arg BUILD_FROM=ghcr.io/home-assistant/aarch64-base-debian:bookworm \
-  -f "${REPO_ROOT}/addon/garage-bridge/Dockerfile" \
+  -f "${REPO_ROOT}/garage-bridge/Dockerfile" \
   -t "${IMAGE_TAG}" \
   "${REPO_ROOT}"
 

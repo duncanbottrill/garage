@@ -7,7 +7,7 @@ await build({
   target: "node22",
   format: "esm",
   outfile: "dist/ingest.js",
-  alias: { "@garage/core": process.env.CORE_PATH ?? "../../../packages/core/src/index.ts" },
+  alias: { "@garage/core": process.env.CORE_PATH ?? "../../packages/core/src/index.ts" },
   banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" },
 });
 

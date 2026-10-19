@@ -28,9 +28,8 @@
 ## File structure
 
 ```
-addon/
-  repository.yaml                       HA add-on repository descriptor
-  garage-bridge/
+repository.yaml                         HA add-on repository descriptor (moved to the repo root in Task 7: HA requires it at the git root)
+garage-bridge/
     config.yaml                         add-on manifest (options, schema, ports, map, image)
     build.yaml                          base images per arch
     Dockerfile                          multi-stage: go builder (proxy), copy fleet-telemetry, node build (ingest), alpine runtime
@@ -394,7 +393,7 @@ Run: `cd addon/garage-bridge/ingest && npm install && npm test` → FAIL (module
 **Owner steps (runbook):**
 1. Tailscale admin console: enable Funnel in the tailnet policy (`nodeAttrs: [{ target: ["tag:garage"], attr: ["funnel"] }]` or the Funnel toggle), create a reusable, pre-authorised auth key tagged `tag:garage` (90-day expiry is fine; the node keeps its own key after first auth).
 2. Home Assistant: install the official Mosquitto broker add-on, create a HA user `garage` for MQTT (Settings → People → Users, "can only log in from local network" off), start Mosquitto.
-3. Add the repository `https://github.com/duncanbottrill/garage` (subfolder `addon` is found automatically via `repository.yaml` at the repo root? No — HA expects `repository.yaml` at the git root. Decision: keep `repository.yaml` at the **repo root** and the add-on at `/garage-bridge`? That moves files. Alternative decision used here: publish the add-on repository as a separate branch `addon-repo` or a separate repo `duncanbottrill/garage-addons` containing `repository.yaml` + `garage-bridge/` (config.yaml only needs `image:`; the Dockerfile is not needed by HA when `image` is set). Task 7's workflow syncs `addon/` to that repo on tag. Document the chosen mechanism.
+3. Add the repository `https://github.com/duncanbottrill/garage`. **Decision (made in Task 7):** HA expects `repository.yaml` at the git root, so the add-on was moved there — `repository.yaml` and `garage-bridge/` now live at the repo root (no more `addon/` prefix) — keeping a single repo and no cross-repo sync or tokens.
 4. Install Garage Bridge, fill options: Tailscale auth key, hostname `garage-bridge`, Tesla private key (paste the PEM from `~/.garage/private-key.pem`), VIN, bridge secret (from `~/.garage/vercel-secrets.env`), Supabase URL + service key, MQTT user/password. Start.
 5. Verify in the add-on log: `tailscale up as garage-bridge.<tailnet>.ts.net`, `tlscert: certificate … refreshed`, `funnel status` showing `tcp://…:443 → 127.0.0.1:8443`, fleet-telemetry listening, proxy listening, ingest `resolved vehicle`, `telemetry config synced`.
 6. Verify in Supabase: `vehicles.telemetry_config_hash` set and `telemetry_confirmed_at` recent; `signals` rows arriving; `vehicle_state.bridge_seen_at` fresh; the Status data changing when the car is driven.

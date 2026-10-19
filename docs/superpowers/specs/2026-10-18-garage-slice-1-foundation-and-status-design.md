@@ -125,9 +125,9 @@ A "Refresh now" action in More (not on Status) makes one `vehicle_data` request 
 - llamafilm's add-on from its repository. Options: private key, domain `garage.duncanbottrill.com`, region EU, listen on the tailnet interface only, port 4430.
 - No code of ours. Health checked by the bridge (`GET /health`).
 
-### 5.3 Garage Bridge add-on (`addon/`)
+### 5.3 Garage Bridge add-on (`garage-bridge/`, repo root)
 
-- Custom add-on repository `duncanbottrill/garage` (`addon/repository.yaml`, `addon/garage-bridge/config.yaml`), architecture `aarch64` (and `amd64` for local dev), image built by GitHub Actions and pushed to GHCR; HA pulls the image.
+- Custom add-on repository `duncanbottrill/garage` (`repository.yaml`, `garage-bridge/config.yaml`, both at the repo root, as Home Assistant requires), architecture `aarch64` (and `amd64` for local dev), image built by GitHub Actions and pushed to GHCR; HA pulls the image.
 - One container, `s6-overlay` supervising two services:
   1. `fleet-telemetry` (Tesla's binary) with `config.json` generated from add-on options at start.
   2. `ingest` (Node 22, TypeScript): consumes decoded messages, writes `signals` in batches of ≤200 rows or every 2 s, upserts `vehicle_state`, maintains per-field `*_at` timestamps, emits connectivity state.
@@ -266,7 +266,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 
 ## 12. Testing
 
-- `addon/ingest`: unit tests on decode → state mapping with recorded fixtures (captured from the real car once streaming) and synthetic edge cases (sleep mid-drive, dropout, out-of-order timestamps). Integration test runs the real `fleet-telemetry` binary with a replayed stream against a local Supabase.
+- `garage-bridge/ingest`: unit tests on decode → state mapping with recorded fixtures (captured from the real car once streaming) and synthetic edge cases (sleep mid-drive, dropout, out-of-order timestamps). Integration test runs the real `fleet-telemetry` binary with a replayed stream against a local Supabase.
 - `apps/web`: route tests with mocked Tesla endpoints; PKCE/state checks; cron idempotency (refresh twice → one rotation).
 - `apps/apple`: GarageKit unit tests (freshness, optimistic revert, idempotency); snapshot tests of Status/Climate/Charge/More in states live, stale, offline, pending.
 - `supabase`: migrations applied in CI against a branch database; RLS policy tests (owner A cannot read owner B).
@@ -275,7 +275,8 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 
 ```
 garage/
-  addon/                 HA add-on repository (repository.yaml, garage-bridge/)
+  repository.yaml        HA add-on repository descriptor (repo root, as HA requires)
+  garage-bridge/          Garage Bridge HA add-on
   apps/web/              Next.js on Vercel (garage domain)
   apps/apple/            Xcode project + GarageKit package
   packages/tokens/       tokens.json → Swift + CSS generators

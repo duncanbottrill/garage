@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   resolve: {
     alias: {
-      "@garage/core": path.resolve(__dirname, "../../../packages/core/src/index.ts"),
+      "@garage/core": path.resolve(__dirname, "../../packages/core/src/index.ts"),
     },
   },
 });

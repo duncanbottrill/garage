@@ -1,8 +1,0 @@
-{
-  "extends": "../../../tsconfig.base.json",
-  "compilerOptions": {
-    "paths": { "@garage/core": ["../../../packages/core/src/index.ts"] },
-    "baseUrl": "."
-  },
-  "include": ["src", "test"]
-}

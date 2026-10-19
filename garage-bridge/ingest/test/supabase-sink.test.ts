@@ -9,28 +9,35 @@ let admin: SupabaseClient;
 let ownerId: string;
 let vehicleId: string;
 
-beforeAll(async () => {
-  admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+// These tests hit a real (local) Supabase instance and have no mock
+// fallback, so they only run when SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY
+// are set (e.g. via `supabase start` locally). CI's `test` job does not
+// start Supabase, so this suite is skipped there — both the hooks and the
+// cases, since skipIf gates the whole describe block including beforeAll.
+const hasSupabaseEnv = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const email = `ingest-sink-${Date.now()}@test.local`;
-  const created = await admin.auth.admin.createUser({ email, password: "pass-1234", email_confirm: true });
-  ownerId = created.data.user!.id;
+describe.skipIf(!hasSupabaseEnv)("SupabaseSink", () => {
+  beforeAll(async () => {
+    admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
-  const { data: vehicle, error } = await admin
-    .from("vehicles")
-    .insert({ owner_id: ownerId, vin: VIN, display_name: "Sink Test Car" })
-    .select("id")
-    .single();
-  if (error) throw error;
-  vehicleId = vehicle!.id;
-});
+    const email = `ingest-sink-${Date.now()}@test.local`;
+    const created = await admin.auth.admin.createUser({ email, password: "pass-1234", email_confirm: true });
+    ownerId = created.data.user!.id;
 
-afterAll(async () => {
-  await admin.from("vehicles").delete().eq("id", vehicleId);
-  await admin.auth.admin.deleteUser(ownerId);
-});
+    const { data: vehicle, error } = await admin
+      .from("vehicles")
+      .insert({ owner_id: ownerId, vin: VIN, display_name: "Sink Test Car" })
+      .select("id")
+      .single();
+    if (error) throw error;
+    vehicleId = vehicle!.id;
+  });
 
-describe("SupabaseSink", () => {
+  afterAll(async () => {
+    await admin.from("vehicles").delete().eq("id", vehicleId);
+    await admin.auth.admin.deleteUser(ownerId);
+  });
+
   it("ensureStateRow creates the vehicle_state row and is idempotent", async () => {
     const sink = SupabaseSink(admin, { vehicleId, ownerId });
 

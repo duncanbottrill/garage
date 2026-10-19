@@ -46,6 +46,19 @@ each placeholder with its real implementation.
 `9090/tcp` exposes `fleet-telemetry`'s Prometheus metrics internally; it is
 also used as the add-on's watchdog check.
 
+## Installing
+
+Settings → Add-ons → Add-on store → ⋮ (top right) → Repositories → add
+`https://github.com/duncanbottrill/garage` → Add. "Garage Bridge" then
+appears in the store; install it from there.
+
+The add-on images (`ghcr.io/duncanbottrill/garage-bridge-aarch64` and
+`ghcr.io/duncanbottrill/garage-bridge-amd64`) are built and pushed by CI
+(`.github/workflows/addon.yml`) and pulled from GHCR — Home Assistant does
+not build the image itself. The two GHCR packages must be set to public
+(one-time, by the repository owner) so the Green can pull them without
+needing its own registry credentials.
+
 ## Building locally
 
 Docker on this Mac is Colima (arm64 native), so `docker build` produces the
@@ -55,7 +68,7 @@ same architecture as the Green. From the repo root:
 docker build \
   --build-arg BUILD_FROM=ghcr.io/home-assistant/aarch64-base-debian:bookworm \
   --build-arg BUILD_ARCH=aarch64 \
-  -f addon/garage-bridge/Dockerfile -t garage-bridge:dev .
+  -f garage-bridge/Dockerfile -t garage-bridge:dev .
 ```
 
 `BUILD_ARCH` defaults to `aarch64` and feeds the `io.hass.arch` label; pass

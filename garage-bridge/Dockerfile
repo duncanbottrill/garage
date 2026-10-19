@@ -20,9 +20,9 @@ FROM tesla/fleet-telemetry:v0.9.5 AS telemetry
 # --- ingest bundle ---
 FROM node:22-alpine AS ingest
 WORKDIR /src
-COPY addon/garage-bridge/ingest/package.json addon/garage-bridge/ingest/package-lock.json* ./
+COPY garage-bridge/ingest/package.json garage-bridge/ingest/package-lock.json* ./
 RUN npm install --no-audit --no-fund
-COPY addon/garage-bridge/ingest/ ./
+COPY garage-bridge/ingest/ ./
 # Nested under /src (not a /core sibling): @garage/core's own runtime deps
 # (@noble/ciphers, imported by crypto.ts via bare subpath specifiers like
 # "@noble/ciphers/chacha") resolve by walking up from the importing file,
@@ -69,6 +69,6 @@ COPY --from=ingest /src/dist /app/ingest/dist
 RUN mkdir -p /usr/share/garage \
     && curl -fsSL https://letsencrypt.org/certs/isrgrootx1.pem -o /usr/share/garage/isrgrootx1.pem
 
-COPY addon/garage-bridge/rootfs/ /
+COPY garage-bridge/rootfs/ /
 RUN chmod a+x /etc/s6-overlay/s6-rc.d/*/run /etc/s6-overlay/s6-rc.d/*/finish /usr/bin/garage-* 2>/dev/null || true
 LABEL io.hass.version="0.1.0" io.hass.type="addon" io.hass.arch="${BUILD_ARCH}"
