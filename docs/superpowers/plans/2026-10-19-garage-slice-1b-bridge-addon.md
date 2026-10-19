@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Plan 1A/1A.2 constraints hold (metric units, no automatic wakes, every billable call counted, conventional commits with trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`).
-- **The bridge never holds Tesla tokens or the Supabase anon key.** It holds: the Supabase service key (writes only via `signals` insert, `merge_vehicle_state`, `increment_usage`, `vehicles` update of telemetry columns), the bridge secret (for `GET https://garage.duncanbottrill.com/api/bridge/token` with header `x-bridge-secret`), the Tesla command private key (for the proxy), a Tailscale auth key, and the Mosquitto credentials. All arrive through add-on options; none are baked into the image or repo.
+- **The bridge never holds Tesla refresh tokens or the Supabase anon key, and never persists an access token.** It fetches a short-lived Tesla access token from `GET https://garage.duncanbottrill.com/api/bridge/token` (header `x-bridge-secret`) and keeps it in memory only, re-fetched on a 401 or once its cache margin runs out. What it does hold: the Supabase service key (writes only via `signals` insert, `merge_vehicle_state`, `increment_usage`, `vehicles` update of telemetry columns), the bridge secret itself, the Tesla command private key (for the proxy), a Tailscale auth key, and the Mosquitto credentials. All arrive through add-on options; none are baked into the image or repo.
 - `vehicle_state` is written only through `merge_vehicle_state(p_vehicle, p_patch)` (JSON null = omit; door/window keys `driver_front|passenger_front|driver_rear|passenger_rear`; the row must exist, the ingest upserts `{vehicle_id, owner_id}` with `ignoreDuplicates` once at start).
 - Telemetry config is registered through the proxy at `POST /api/1/vehicles/fleet_telemetry_config` with `{ vins: [VIN], config }`; the proxy signs it (`Tesla.SS256`) and forwards to `fleet_telemetry_config_jws`. Confirm with `GET /api/1/vehicles/{vin}/fleet_telemetry_config` → `synced: true`; on failure read `GET .../fleet_telemetry_errors`.
 - Telemetry config body: `hostname` = the add-on's tailnet FQDN (`<hostname>.<tailnet>.ts.net`), `port` 443, `ca` = PEM chain (Let's Encrypt intermediate + ISRG Root X1) from `tailscale cert`, `fields` per budget mode (below), `alert_types: ["service"]`, `exp` = now + 180 days. `Location` requires the `vehicle_location` scope (granted).
@@ -409,3 +409,22 @@ Run: `cd addon/garage-bridge/ingest && npm install && npm test` → FAIL (module
 - **Open risks carried deliberately:** Funnel raw-TCP + mTLS is smoke-tested in Task 2 before anything depends on it; max fields per config is undocumented (31 fields; if Tesla rejects, Task 4's error path surfaces `telemetry_last_error` and the cadence table shrinks); `tesla-http-proxy` TLS flags are verified in Task 5 with the self-signed fallback; the HA repository layout decision is made in Task 8.
 - **Deferred from the 1A.2 review, still deferred:** merge staleness guard and `p_clear` (ingest sends only fields it received, so staleness only matters against manual refresh; manual refresh is rare); narrower bridge credential than the service key.
 - **Type consistency:** `BridgeEvent`, `Batcher`, `Health`, `SupabaseSink`, `BridgeToken`, `TelemetryConfigManager` names are used identically in Tasks 3, 4, 6; option keys fixed in Task 1 and read by Tasks 2, 4, 5.
+
+## Execution record
+
+Tasks 1–7 complete on branch `slice-1b-bridge`. The final whole-branch review found 22 issues; items 1–8, 13 and 16 (10 findings) were fixed before tagging `bridge-v0.1.0`. The rest are tracked here, not only in scratch files:
+
+- Real `fleet-telemetry` → MQTT payload shapes were never captured — now addressed by Task 8's runbook step (capture via `mosquitto_sub` during the first live streaming window, saved under `dev/replay/fixtures/`).
+- The `proxy` service's TLS listener uses a self-signed certificate on the tailnet; a trusted cert is deferred to Plan 1C (recorded in spec §5.8).
+- Ingest crash-loops if Supabase is unreachable at boot, rather than retrying gracefully.
+- Usage counting can be lost on a throw, or rows can go uncounted.
+- MQTT timestamps bunch up after a reconnect (the client uses `clean: false`).
+- Dockerfile should move from `npm install` to `npm ci`, address cross-compile, and resolve the duplicated `io.hass.version`.
+- The add-on's `map: share` mount is unneeded; metrics bind `0.0.0.0:9090` rather than a narrower address.
+- `tailscaled` writes to its logtail; should run with `--no-logs-no-support`.
+- The proxy always runs with `-verbose`.
+- The heartbeat does not reflect receiver liveness, only the ingest's own.
+- `Soc` vs `BatteryLevel` can jitter against each other.
+- The dev mock-supervisor binds `0.0.0.0` rather than loopback.
+
+Minor concerns raised on re-review of the fix commits themselves: `tailscale up` now has its own bounded timeout; the `tailscale` service's trap now waits for `tailscaled` to actually exit rather than just signalling it; the poll-retry bound of 3 ticks used after the first confirmation window is short; a dropped state value still refreshes its own timestamp on resend. Also still open from the 1A.2 review (reiterated in spec §5.8): a bridge credential narrower than the full Supabase service key, `merge_vehicle_state`'s `p_clear` parameter, and a merge staleness guard.
