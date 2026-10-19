@@ -55,7 +55,7 @@ function mergePatch(base: Record<string, unknown>, patch: Record<string, unknown
 function readTailnetFqdn(hostname: string): string | null {
   // Written by the `tlscert` rootfs service once `tailscale cert` has run.
   try {
-    const tailnet = readFileSync("/data/tailscale/tailnet", "utf8").trim();
+    const tailnet = readFileSync("/data/tailscale/fqdn", "utf8").trim();
     return tailnet ? `${hostname}.${tailnet}.ts.net` : null;
   } catch {
     return null;
