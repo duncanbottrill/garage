@@ -1,0 +1,42 @@
+# Local end-to-end harness for the garage-bridge add-on image: mosquitto +
+# the built image, tailscale disabled, dev TLS mounted, the e2e options
+# file mounted, pointed at the mock Home Assistant Supervisor started by
+# dev/e2e-bridge.sh on the host (bashio::config needs it — ingest/run reads
+# LOG_LEVEL via bashio, telemetry/run and proxy/run read everything via it).
+#
+# Orchestrated by dev/e2e-bridge.sh, not run standalone: that script builds
+# garage-bridge:dev, resolves the real Supabase service key into a scratch
+# copy of dev/options.e2e.json (exported here as GARAGE_E2E_OPTIONS_FILE),
+# starts the mock supervisor, runs `docker compose -f dev/compose.bridge.yaml
+# -p garage-bridge-e2e up -d`, replays MQTT fixtures, asserts against the
+# local Supabase DB, then tears everything down.
+#
+# Supabase itself runs on the Mac (local `supabase start`), reached from
+# the bridge container the same way Task 5 proved out: `host.lima.internal`
+# (Colima's VM-to-host DNS name) — not a compose service here.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: gb-e2e-mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -p 1883 -t healthcheck -m ok -q 0 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  garage-bridge:
+    image: garage-bridge:dev
+    container_name: gb-e2e-bridge
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      SUPERVISOR_API: "http://host.lima.internal:${GARAGE_E2E_SUPERVISOR_PORT:-8126}"
+      SUPERVISOR_TOKEN: "garage-e2e-dev"
+    volumes:
+      - ${GARAGE_E2E_OPTIONS_FILE}:/data/options.json:ro
+      - ./tls:/data/tls:ro
