@@ -11,7 +11,9 @@ export interface IngestOptions {
    * `telemetry.garage.duncanbottrill.com`). When set, the add-on serves
    * fleet-telemetry with a leaf from its own private CA and registers this
    * hostname with Tesla instead of the tailnet FQDN. Trimmed and
-   * lower-cased; empty or whitespace-only means unset.
+   * lower-cased; empty or whitespace-only means unset. Anything else outside
+   * `[a-z0-9.-]` (including inner whitespace) makes `loadOptions` throw, the
+   * same rule `tlscert/run` applies before it idles.
    */
   telemetry_hostname?: string;
   tesla_private_key: string | undefined;
@@ -77,8 +79,17 @@ function asString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
+const HOSTNAME_CHARS = /^[a-z0-9.-]+$/;
+
 function asHostname(v: unknown): string | undefined {
   if (typeof v !== "string") return undefined;
   const trimmed = v.trim().toLowerCase();
-  return trimmed.length > 0 ? trimmed : undefined;
+  if (trimmed.length === 0) return undefined;
+  if (!HOSTNAME_CHARS.test(trimmed)) {
+    throw new Error(
+      `garage-bridge ingest: telemetry_hostname '${trimmed}' is not a valid hostname ` +
+        "(letters, digits, dots and hyphens only, e.g. telemetry.duncanbottrill.com)",
+    );
+  }
+  return trimmed;
 }

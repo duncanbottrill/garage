@@ -55,6 +55,23 @@ describe("loadOptions", () => {
     expect(opts.telemetry_hostname).toBe("telemetry.garage.duncanbottrill.com");
   });
 
+  it("rejects a telemetry_hostname with internal whitespace", () => {
+    expect(() => loadOptions(optionsFile({ telemetry_hostname: "telemetry.garage .duncanbottrill.com" }))).toThrow(
+      /telemetry_hostname 'telemetry\.garage \.duncanbottrill\.com' is not a valid hostname/,
+    );
+  });
+
+  it("rejects a telemetry_hostname with characters outside [a-z0-9.-]", () => {
+    for (const bad of ["telemetry_garage.duncanbottrill.com", "https://telemetry.duncanbottrill.com", "telemetry.duncanbottrill.com:443", "tele/metry.com"]) {
+      expect(() => loadOptions(optionsFile({ telemetry_hostname: bad })), bad).toThrow(/telemetry_hostname .* is not a valid hostname/);
+    }
+  });
+
+  it("accepts letters, digits, dots and hyphens after trimming and lower-casing", () => {
+    const opts = loadOptions(optionsFile({ telemetry_hostname: "\tTelemetry-1.Garage.DuncanBottrill.COM\n" }));
+    expect(opts.telemetry_hostname).toBe("telemetry-1.garage.duncanbottrill.com");
+  });
+
   it("still reads the existing options unchanged", () => {
     const opts = loadOptions(optionsFile({ telemetry_hostname: "telemetry.garage.duncanbottrill.com" }));
     expect(opts.tesla_vin).toBe("XP7YTEST00000001");
