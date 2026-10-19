@@ -29,6 +29,9 @@
 # is not [a-z0-9.-] (inner whitespace included) is an error: logged, then
 # this service idles until the option is fixed.
 set -euo pipefail
+# Byte-wise trimming/matching: under C.UTF-8 [:space:] would also trim
+# Unicode spaces, which the ingest (ASCII-only) rejects.
+export LC_ALL=C
 
 TELEMETRY_HOSTNAME=""
 if bashio::config.has_value 'telemetry_hostname'; then

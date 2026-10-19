@@ -41,6 +41,8 @@ if [ -n "${TELEMETRY_HOSTNAME}" ]; then
   fi
 else
   bashio::log.info "tailscale: no telemetry_hostname; publishing 443 through Funnel to fleet-telemetry (fallback mode)"
+  # Clear a tailnet 8443 route left over from hostname mode (serve config persists).
+  "${TS[@]}" serve --tcp=8443 off >/dev/null 2>&1 || true
   "${TS[@]}" serve --bg --tcp=443 tcp://127.0.0.1:8443
 
   if ! "${TS[@]}" funnel --bg 443 on; then
