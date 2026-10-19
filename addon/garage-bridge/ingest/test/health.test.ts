@@ -14,6 +14,7 @@ describe("Health", () => {
       active_alerts: [],
       last_error: null,
       last_vehicle_error: null,
+      last_mqtt_error: null,
     });
   });
 
@@ -41,6 +42,18 @@ describe("Health", () => {
     health.vehicleError("SomeError", "detail");
     health.patchFailed(new Error("merge boom"));
     const payload = health.payload();
+    expect(payload.patch_failures).toBe(1);
+    expect(payload.last_error).toBe("merge boom");
+    expect(payload.last_vehicle_error).toBe("SomeError: detail");
+  });
+
+  it("mqttError records last_mqtt_error without touching patch_failures, last_error, or last_vehicle_error", () => {
+    const health = new Health();
+    health.vehicleError("SomeError", "detail");
+    health.patchFailed(new Error("merge boom"));
+    health.mqttError("connection refused");
+    const payload = health.payload();
+    expect(payload.last_mqtt_error).toBe("connection refused");
     expect(payload.patch_failures).toBe(1);
     expect(payload.last_error).toBe("merge boom");
     expect(payload.last_vehicle_error).toBe("SomeError: detail");

@@ -137,9 +137,33 @@ describe("Batcher", () => {
     const onFlush = vi.fn().mockResolvedValue(undefined);
     const batcher = new Batcher<number>({ onFlush });
 
-    await batcher.flush();
+    const result = await batcher.flush();
 
     expect(onFlush).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("flush() reports { ok: false, error } instead of throwing when onFlush rejects", async () => {
+    const boom = new Error("insert failed");
+    const onFlush = vi.fn().mockRejectedValue(boom);
+    const batcher = new Batcher<number>({ onFlush });
+
+    batcher.push(1);
+    const result = await batcher.flush();
+
+    expect(result).toEqual({ ok: false, error: boom });
+    // The failed batch is retained for a later retry, same as flushIfDue.
+    expect(batcher.stats()).toEqual({ pending: 1, dropped: 0, flushed: 0 });
+  });
+
+  it("flush() reports { ok: true } when onFlush succeeds", async () => {
+    const onFlush = vi.fn().mockResolvedValue(undefined);
+    const batcher = new Batcher<number>({ onFlush });
+
+    batcher.push(1);
+    const result = await batcher.flush();
+
+    expect(result).toEqual({ ok: true });
   });
 
   it("flush() waits for an in-flight flushIfDue flush before running its own", async () => {

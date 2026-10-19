@@ -167,7 +167,7 @@ describe("TelemetryConfigManager.ensure", () => {
 
     const result: EnsureResult = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" });
 
-    expect(result).toEqual({ changed: false });
+    expect(result).toEqual({ changed: false, reason: "current" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(sink.countUsage).not.toHaveBeenCalled();
     expect(sink.setTelemetryConfig).not.toHaveBeenCalled();
@@ -179,8 +179,8 @@ describe("TelemetryConfigManager.ensure", () => {
     const caPem = "ca";
     const matchingHash = configHash({ hostname, caPem, fields });
 
-    const now = new Date("2026-10-19T00:00:00.000Z");
-    const staleConfirmedAt = new Date(now.getTime() - 151 * 24 * 3600 * 1000).toISOString();
+    const now = new Date("2026-10-19T00:00:00.000Z").getTime();
+    const staleConfirmedAt = new Date(now - 151 * 24 * 3600 * 1000).toISOString();
     const vehicle = makeVehicle({ configHash: matchingHash, configVersion: 5, confirmedAt: staleConfirmedAt });
     const sink = makeSink(vehicle);
     const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
@@ -202,11 +202,11 @@ describe("TelemetryConfigManager.ensure", () => {
 
     const result = await manager.ensure("normal", { fqdn: hostname, caPem }, now);
 
-    expect(result).toEqual({ changed: true, synced: true });
+    expect(result).toEqual({ changed: true });
     expect(fetchMock).toHaveBeenCalledTimes(2); // POST + 1 poll — staleness forced a real re-registration
   });
 
-  it("posts once, polls until synced, and stamps confirmedAt from when the synced poll returned (not ensure-start)", async () => {
+  it("posts once, polls until synced, and stamps confirmedAt from clock() (the time the synced poll returned), not ensure-start", async () => {
     const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 3 });
     const sink = makeSink(vehicle);
     const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
@@ -221,7 +221,7 @@ describe("TelemetryConfigManager.ensure", () => {
       .mockResolvedValueOnce(jsonResponse({ response: { synced: true } }));
 
     const sleep = vi.fn().mockResolvedValue(undefined);
-    const ensureStart = new Date("2026-10-19T00:00:00.000Z");
+    const ensureStart = new Date("2026-10-19T00:00:00.000Z").getTime();
     const syncedReturnedAt = new Date("2026-10-19T00:00:31.000Z"); // distinct from ensure-start
     const clock = vi.fn().mockReturnValue(syncedReturnedAt);
 
@@ -238,7 +238,7 @@ describe("TelemetryConfigManager.ensure", () => {
 
     const result = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, ensureStart);
 
-    expect(result).toEqual({ changed: true, synced: true });
+    expect(result).toEqual({ changed: true });
     expect(fetchMock).toHaveBeenCalledTimes(3);
 
     const postCall = fetchMock.mock.calls[0]!;
@@ -256,14 +256,14 @@ describe("TelemetryConfigManager.ensure", () => {
     expect(sink.setTelemetryConfig).toHaveBeenCalledTimes(1);
     const [setArgs] = sink.setTelemetryConfig.mock.calls[0]!;
     expect(setArgs.version).toBe(4);
-    // confirmedAt is the time the synced:true poll RETURNED (the injected clock), not ensure-start.
+    // confirmedAt is clock()'s value (the time the synced:true poll RETURNED), not ensure-start.
     expect(setArgs.confirmedAt).toBe(syncedReturnedAt.toISOString());
-    expect(setArgs.confirmedAt).not.toBe(ensureStart.toISOString());
+    expect(setArgs.confirmedAt).not.toBe(new Date(ensureStart).toISOString());
     expect(setArgs.lastError).toBeNull();
     expect(typeof setArgs.hash).toBe("string");
   });
 
-  it("fetches errors and records telemetry_last_error when synced never arrives", async () => {
+  it("fetches errors and records telemetry_last_error when synced never arrives within the first 40-poll run", async () => {
     const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 0 });
     const sink = makeSink(vehicle);
     const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
@@ -291,9 +291,7 @@ describe("TelemetryConfigManager.ensure", () => {
 
     const result = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" });
 
-    expect((result as { changed: true }).changed).toBe(true);
-    expect((result as { synced: false; error: string }).synced).toBe(false);
-    expect((result as { synced: false; error: string }).error).toBe("config_rejected: unsupported field");
+    expect(result).toEqual({ changed: false, reason: "not_synced" });
 
     expect(sink.setTelemetryConfig).toHaveBeenCalledTimes(1);
     expect(sink.setTelemetryConfig).toHaveBeenCalledWith({ lastError: "config_rejected: unsupported field" });
@@ -303,7 +301,7 @@ describe("TelemetryConfigManager.ensure", () => {
     expect(sink.countUsage).toHaveBeenCalledTimes(42);
   }, 10_000);
 
-  it("returns skipped in_flight when a second ensure() overlaps an in-progress one", async () => {
+  it("returns in_flight when a second ensure() overlaps an in-progress one", async () => {
     const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 0 });
     const sink = makeSink(vehicle);
     const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
@@ -325,24 +323,33 @@ describe("TelemetryConfigManager.ensure", () => {
       sleep,
     });
 
+    // Both calls' resolveVehicle() microtasks queue in order; the first one's
+    // continuation runs synchronously (no intervening await) through the
+    // current/inFlight/token-wait checks and sets inFlight = true before the
+    // second call's own continuation gets a turn — so no extra synchronization
+    // is needed here, same as the old (pre-resolveVehicle-in-the-gate) version
+    // of this test.
     const first = manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" });
     const second = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" });
 
-    expect(second).toEqual({ skipped: "in_flight" });
+    expect(second).toEqual({ changed: false, reason: "in_flight" });
 
     fetchMock.mockImplementation(async () => jsonResponse({ response: { synced: true } }));
     resolvePost!();
     const firstResult = await first;
-    expect(firstResult).toEqual({ changed: true, synced: true });
+    expect(firstResult).toEqual({ changed: true });
   });
 
-  it("after a POST failure, a later ensure() within the backoff window only polls, bounded to 4 GETs", async () => {
+  it("Sequence (b): a POST failure backs off with ZERO calls, and the window-end call re-POSTs and confirms (POST count 2, GET count 1)", async () => {
     const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 1 });
     const sink = makeSink(vehicle);
     const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
     const sleep = vi.fn().mockResolvedValue(undefined);
 
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ error: "server_error" }, 500));
+
+    const t0 = new Date("2026-10-19T00:00:00.000Z").getTime();
+    let simClock = t0;
 
     const manager = TelemetryConfigManager({
       proxyBase: "https://127.0.0.1:4443",
@@ -351,34 +358,50 @@ describe("TelemetryConfigManager.ensure", () => {
       sink,
       fetch: fetchMock as unknown as typeof fetch,
       sleep,
+      clock: () => new Date(simClock),
     });
 
-    const t0 = new Date("2026-10-19T00:00:00.000Z");
     const first = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, t0);
-    expect((first as { changed: true }).changed).toBe(true);
-    expect((first as { synced: false; error: string }).error).toContain("post 500");
+    expect(first).toEqual({ changed: false, reason: "post_failed" });
     expect(fetchMock).toHaveBeenCalledTimes(1); // stopped immediately on the non-2xx POST, no polling
 
-    // Still within the 15-minute backoff window: only re-checks sync status, never re-POSTs.
-    fetchMock.mockImplementation(async () => jsonResponse({ response: { synced: false } }));
-    const tWithinWindow = new Date(t0.getTime() + 5 * 60_000);
-    const second = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, tWithinWindow);
-
-    expect((second as { changed: true }).changed).toBe(true);
-    expect((second as { synced: false }).synced).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(1 + 4); // bounded to exactly 4 GETs
-    for (const call of fetchMock.mock.calls.slice(1)) {
-      expect(call[1]).not.toMatchObject({ method: "POST" });
+    // +5min and +10min: still inside the 15-minute POST backoff window -> post_backoff, ZERO calls.
+    for (const offsetMin of [5, 10]) {
+      const t = t0 + offsetMin * 60_000;
+      simClock = t;
+      // eslint-disable-next-line no-await-in-loop
+      const result = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, t);
+      expect(result).toEqual({ changed: false, reason: "post_backoff" });
     }
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no new calls at all during backoff
+
+    // +15min: the backoff window has elapsed exactly (now === nextPostAt) -> re-POSTs (2nd attempt).
+    // Make this one succeed, and synced on the very first poll.
+    fetchMock.mockResolvedValueOnce(jsonResponse({ response: {} })); // POST #2 -> 200
+    fetchMock.mockResolvedValueOnce(jsonResponse({ response: { synced: true } })); // poll #1 -> synced
+
+    const t15 = t0 + 15 * 60_000;
+    simClock = t15;
+    const confirmed = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, t15);
+    expect(confirmed).toEqual({ changed: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3); // 1 failed POST + 1 succeeded POST + 1 poll
+    const posts = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === "POST");
+    const gets = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method !== "POST");
+    expect(posts).toHaveLength(2);
+    expect(gets).toHaveLength(1);
   });
 
-  it("a config hash change bypasses an active backoff window for the old hash", async () => {
+  it("a config hash change bypasses an active POST backoff window for the old hash", async () => {
     const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 1 });
     const sink = makeSink(vehicle);
     const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
     const sleep = vi.fn().mockResolvedValue(undefined);
 
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ error: "server_error" }, 500));
+
+    const t0 = new Date("2026-10-19T00:00:00.000Z").getTime();
+    let simClock = t0;
 
     const manager = TelemetryConfigManager({
       proxyBase: "https://127.0.0.1:4443",
@@ -387,39 +410,43 @@ describe("TelemetryConfigManager.ensure", () => {
       sink,
       fetch: fetchMock as unknown as typeof fetch,
       sleep,
+      clock: () => new Date(simClock),
     });
 
-    const t0 = new Date("2026-10-19T00:00:00.000Z");
-    await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, t0);
+    const first = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, t0);
+    expect(first).toEqual({ changed: false, reason: "post_failed" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Different fqdn => different hash => a fresh POST happens immediately,
     // even though we're still inside the backoff window for the OLD hash.
     fetchMock.mockImplementation(async () => jsonResponse({ response: { synced: true } }));
-    const tWithinWindow = new Date(t0.getTime() + 5 * 60_000);
+    const tWithinWindow = t0 + 5 * 60_000;
+    simClock = tWithinWindow;
     const result = await manager.ensure("normal", { fqdn: "new-host.ts.net", caPem: "ca" }, tWithinWindow);
 
-    expect(result).toEqual({ changed: true, synced: true });
+    expect(result).toEqual({ changed: true });
     const postCall = fetchMock.mock.calls[1]!;
     expect(postCall[1]).toMatchObject({ method: "POST" });
   });
 
-  it("refreshes the bridge token once and retries on a 401, then succeeds", async () => {
+  it("Sequence (d): refreshes the bridge token once on a 401 mid-poll and confirms after the retry succeeds", async () => {
     const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 0 });
     const sink = makeSink(vehicle);
     const token = {
-      get: vi
-        .fn()
-        .mockResolvedValueOnce({ access_token: "stale-tok", expires_at: "2099-01-01" })
-        .mockResolvedValueOnce({ access_token: "fresh-tok", expires_at: "2099-01-01" }),
+      get: vi.fn().mockImplementation(async (getOpts?: { force?: boolean }) =>
+        getOpts?.force
+          ? { access_token: "fresh-tok", expires_at: "2099-01-01" }
+          : { access_token: "stale-tok", expires_at: "2099-01-01" },
+      ),
     };
     const sleep = vi.fn().mockResolvedValue(undefined);
 
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ error: "unauthorized" }, 401)) // POST with the stale token
-      .mockResolvedValueOnce(jsonResponse({ response: {} })) // POST retried with the fresh token
-      .mockResolvedValueOnce(jsonResponse({ response: { synced: true } })); // poll
+      .mockResolvedValueOnce(jsonResponse({ response: {} })) // POST -> 200
+      .mockResolvedValueOnce(jsonResponse({ response: { synced: false } })) // poll attempt #1 -> not synced
+      .mockResolvedValueOnce(jsonResponse({ error: "unauthorized" }, 401)) // poll attempt #2 (stale token) -> 401
+      .mockResolvedValueOnce(jsonResponse({ response: { synced: true } })); // poll attempt #2 retried (fresh token) -> synced
 
     const manager = TelemetryConfigManager({
       proxyBase: "https://127.0.0.1:4443",
@@ -432,22 +459,20 @@ describe("TelemetryConfigManager.ensure", () => {
 
     const result = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" });
 
-    expect(result).toEqual({ changed: true, synced: true });
-    expect(token.get).toHaveBeenCalledTimes(2);
-    expect(token.get.mock.calls[1]![0]).toEqual({ force: true });
-    const retriedPost = fetchMock.mock.calls[1]!;
-    expect(retriedPost[1]).toMatchObject({ headers: { authorization: "Bearer fresh-tok" } });
+    expect(result).toEqual({ changed: true });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    const forcedCalls = (token.get as ReturnType<typeof vi.fn>).mock.calls.filter((c) => (c[0] as { force?: boolean } | undefined)?.force === true);
+    expect(forcedCalls).toHaveLength(1);
+
+    const retriedCall = fetchMock.mock.calls[3]!;
+    expect(retriedCall[1]).toMatchObject({ headers: { authorization: "Bearer fresh-tok" } });
   });
 
-  it("aborts with an error when the retried call is still 401 after a forced token refresh", async () => {
+  it("throws when the retried call after a forced token refresh is still 401", async () => {
     const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 0 });
     const sink = makeSink(vehicle);
-    const token = {
-      get: vi
-        .fn()
-        .mockResolvedValueOnce({ access_token: "stale-tok", expires_at: "2099-01-01" })
-        .mockResolvedValueOnce({ access_token: "still-bad-tok", expires_at: "2099-01-01" }),
-    };
+    const token = { get: vi.fn().mockResolvedValue({ access_token: "bad-tok", expires_at: "2099-01-01" }) };
     const sleep = vi.fn().mockResolvedValue(undefined);
 
     const fetchMock = vi
@@ -464,13 +489,10 @@ describe("TelemetryConfigManager.ensure", () => {
       sleep,
     });
 
-    const result = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" });
-
-    expect((result as { changed: true }).changed).toBe(true);
-    expect((result as { synced: false; error: string }).synced).toBe(false);
-    expect((result as { synced: false; error: string }).error).toContain("post 401");
-    expect(fetchMock).toHaveBeenCalledTimes(2); // original + one retry, then it aborts
-    expect(sink.setTelemetryConfig).toHaveBeenCalledWith(expect.objectContaining({ lastError: expect.stringContaining("post 401") }));
+    await expect(manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" })).rejects.toThrow(/unauthorized after forced token refresh/);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // original + one retry, then it throws
+    expect(token.get).toHaveBeenCalledTimes(2);
+    expect((token.get as ReturnType<typeof vi.fn>).mock.calls[1]![0]).toEqual({ force: true });
   });
 
   it("stores a bridge-token error as token:<code> and skips registration until retryAt", async () => {
@@ -490,26 +512,174 @@ describe("TelemetryConfigManager.ensure", () => {
       sleep,
     });
 
-    const t0 = new Date("2026-10-19T00:00:00.000Z");
+    const t0 = new Date("2026-10-19T00:00:00.000Z").getTime();
     const first = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, t0);
-    expect(first).toEqual({ changed: true, synced: false, error: "token:token_unavailable" });
+    expect(first).toEqual({ changed: false, reason: "token_error" });
     expect(sink.setTelemetryConfig).toHaveBeenCalledWith({ lastError: "token:token_unavailable" });
     expect(fetchMock).not.toHaveBeenCalled(); // never reached a proxy call
 
-    // Still before retryAt: skip without even touching resolveVehicle/token again.
+    // Still before retryAt: the current-config check (step 1) still runs resolveVehicle — it's
+    // ordered ahead of the token-wait gate — but no token or HTTP calls happen once that gate trips.
     token.get.mockClear();
     sink.resolveVehicle.mockClear();
-    const tBefore = new Date("2026-10-19T00:30:00.000Z");
+    const tBefore = t0 + 30 * 60_000;
     const second = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, tBefore);
-    expect((second as { changed: true }).changed).toBe(true);
+    expect(second).toEqual({ changed: false, reason: "token_wait" });
     expect(token.get).not.toHaveBeenCalled();
-    expect(sink.resolveVehicle).not.toHaveBeenCalled();
+    expect(sink.resolveVehicle).toHaveBeenCalledTimes(1);
 
     // After retryAt: attempts again.
     token.get.mockResolvedValue({ access_token: "tok", expires_at: "2099-01-01" });
     fetchMock.mockImplementation(async () => jsonResponse({ response: { synced: true } }));
-    const tAfter = new Date("2026-10-19T01:30:00.000Z");
+    const tAfter = new Date("2026-10-19T01:30:00.000Z").getTime();
     const third = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, tAfter);
-    expect(third).toEqual({ changed: true, synced: true });
+    expect(third).toEqual({ changed: true });
   });
+
+  it("Sequence (c): a never-synced run schedules its own doubling poll delay (5→10→20→40 min) from clock(), not entry-now", async () => {
+    const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 2 });
+    const sink = makeSink(vehicle);
+    const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return jsonResponse({ response: {} });
+      if (url.includes("fleet_telemetry_errors")) {
+        return jsonResponse({ response: { fleet_telemetry_errors: [{ name: "config_rejected", body: "nope" }] } });
+      }
+      return jsonResponse({ response: { synced: false } });
+    });
+
+    const t0 = new Date("2026-10-19T00:00:00.000Z").getTime();
+    let simClock = t0;
+
+    const manager = TelemetryConfigManager({
+      proxyBase: "https://127.0.0.1:4443",
+      vin: "VIN1",
+      token,
+      sink,
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep,
+      clock: () => new Date(simClock),
+    });
+
+    function callAt(minutesFromT0: number) {
+      const now = t0 + minutesFromT0 * 60_000;
+      // clock() tracks this call's `now`: the manager schedules its next
+      // backoff/poll deadline from clock() ("a fresh now after the work"),
+      // and pinning it to the test's own `now` keeps the gating comparisons
+      // (driven by `now`) and the scheduling (driven by `clock()`) in sync,
+      // which is what makes this deterministic.
+      simClock = now;
+      return manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, now);
+    }
+
+    // Call #1 (t=0): the first run right after the accepted POST — 40 bounded
+    // polls plus 1 errors fetch, all within this one ensure() call.
+    // nextPollAt = now(0) + pollDelayMs(5min) = +5min; pollDelayMs doubles to
+    // 10min for the next run.
+    const r1 = await callAt(0);
+    expect(r1).toEqual({ changed: false, reason: "not_synced" });
+    expect(fetchMock).toHaveBeenCalledTimes(1 + 40 + 1); // POST + 40 polls + 1 errors fetch
+
+    const getCountsAt: number[] = [];
+    async function countGetsAt(minutesFromT0: number): Promise<EnsureResult> {
+      const before = fetchMock.mock.calls.length;
+      const result = await callAt(minutesFromT0);
+      getCountsAt.push(fetchMock.mock.calls.length - before);
+      return result;
+    }
+
+    // +5min: now(5) >= nextPollAt(5) -> proceeds, 4 bounded polls (not the
+    // first run, so no errors re-fetch). nextPollAt = now(5) + pollDelayMs
+    // (10min, doubled after call #1) = +15min; pollDelayMs doubles to 20min.
+    await countGetsAt(5);
+    // +10min: now(10) < nextPollAt(15) -> poll_backoff, zero calls.
+    await countGetsAt(10);
+    // +15min: now(15) >= nextPollAt(15) -> proceeds, 4 polls. nextPollAt =
+    // now(15) + pollDelayMs(20min) = +35min; pollDelayMs doubles to 40min.
+    await countGetsAt(15);
+    // +25min: now(25) < nextPollAt(35) -> poll_backoff, zero calls.
+    await countGetsAt(25);
+    // +30min: now(30) < nextPollAt(35) -> still poll_backoff, zero calls.
+    await countGetsAt(30);
+
+    // Computed from the rule above (not the task sketch's rough "4+0+4+4+0" —
+    // that sketch didn't account for the first run's own 10-minute span of
+    // 15s-apart polls not advancing the schedule's basis beyond entry-now):
+    expect(getCountsAt).toEqual([4, 0, 4, 0, 0]);
+  }, 10_000);
+
+  it("false-confirm guard: a POST failure's backoff window blocks any call, even one that would've reported synced:true", async () => {
+    const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 0 });
+    const sink = makeSink(vehicle);
+    const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ error: "server_error" }, 500));
+
+    const t0 = new Date("2026-10-19T00:00:00.000Z").getTime();
+    let simClock = t0;
+
+    const manager = TelemetryConfigManager({
+      proxyBase: "https://127.0.0.1:4443",
+      vin: "VIN1",
+      token,
+      sink,
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep,
+      clock: () => new Date(simClock),
+    });
+
+    const first = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, t0);
+    expect(first).toEqual({ changed: false, reason: "post_failed" });
+
+    // If a GET were made now it would report synced:true — but we're still
+    // within the 15-minute POST backoff window, so no GET is ever attempted,
+    // and nothing can be falsely confirmed from it.
+    fetchMock.mockImplementation(async () => jsonResponse({ response: { synced: true } }));
+    sink.setTelemetryConfig.mockClear();
+
+    const tWithinWindow = t0 + 5 * 60_000;
+    simClock = tWithinWindow;
+    const second = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" }, tWithinWindow);
+
+    expect(second).toEqual({ changed: false, reason: "post_backoff" });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // only the original failed POST
+    expect(sink.setTelemetryConfig).not.toHaveBeenCalled();
+  });
+
+  it("false-confirm guard: synced:true with a mismatched config.hostname is not trusted as confirmation", async () => {
+    const vehicle = makeVehicle({ configHash: "stale-hash", configVersion: 0 });
+    const sink = makeSink(vehicle);
+    const token = { get: vi.fn().mockResolvedValue({ access_token: "tesla-tok", expires_at: "2099-01-01" }) };
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ response: {} })) // POST -> 200
+      .mockImplementation(async () =>
+        jsonResponse({
+          response: { synced: true, config: { hostname: "someone-elses-host.ts.net", fields: cadenceFields("normal") } },
+        }),
+      );
+
+    const manager = TelemetryConfigManager({
+      proxyBase: "https://127.0.0.1:4443",
+      vin: "VIN1",
+      token,
+      sink,
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep,
+    });
+
+    const result = await manager.ensure("normal", { fqdn: "x.ts.net", caPem: "ca" });
+
+    expect(result).toEqual({ changed: false, reason: "not_synced" });
+    expect(sink.setTelemetryConfig).not.toHaveBeenCalledWith(
+      expect.objectContaining({ hash: expect.anything(), confirmedAt: expect.anything() }),
+    );
+    // 1 POST + 40 polls (every one rejected by the hostname mismatch) + 1 errors fetch.
+    expect(fetchMock).toHaveBeenCalledTimes(1 + 40 + 1);
+  }, 10_000);
 });

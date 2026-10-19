@@ -10,7 +10,7 @@ const FQDN_PATTERN = /^[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$/;
  * truncated write never silently propagates into a telemetry config POST.
  */
 export function readFqdn(path = "/data/tailscale/fqdn"): string {
-  const fqdn = readFileSync(path, "utf8").trim();
+  const fqdn = readFileSync(path, "utf8").trim().toLowerCase();
   if (!FQDN_PATTERN.test(fqdn)) {
     throw new Error(`invalid tailnet FQDN in ${path}: ${JSON.stringify(fqdn)}`);
   }

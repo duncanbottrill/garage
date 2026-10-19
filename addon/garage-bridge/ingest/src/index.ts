@@ -8,11 +8,16 @@ import { Batcher } from "./batcher";
 import { Health } from "./health";
 import { SupabaseSink, type Sink } from "./supabase-sink";
 import { BridgeToken } from "./bridge-token";
-import { TelemetryConfigManager } from "./telemetry-config";
+import { TelemetryConfigManager, type EnsureResult } from "./telemetry-config";
 import { readFqdn } from "./fqdn";
 
 const LEVELS: readonly LogLevel[] = ["trace", "debug", "info", "warning", "error"];
 const NESTED_PATCH_KEYS = new Set(["doors", "windows", "tpms_bar", "bridge_health"]);
+
+// Ensure-result reasons that mean "nothing to do right now, business as
+// usual" — logged at debug. Anything else (post_failed/not_synced/
+// token_error) is a real problem worth operator visibility, logged louder.
+const ROUTINE_ENSURE_REASONS = new Set(["current", "in_flight", "token_wait", "post_backoff", "poll_backoff"]);
 
 const VEHICLE_POLL_MS = 30_000;
 const FLUSH_INTERVAL_MS = 2_000;
@@ -20,7 +25,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const BUDGET_POLL_MS = 5 * 60_000;
 const FORCE_FLUSH_AHEAD_MS = 2_500; // > Batcher's default maxAgeMs, well under maxBufferMs
 
-type Logger = (level: LogLevel, msg: string, extra?: Record<string, unknown>) => void;
+export type Logger = (level: LogLevel, msg: string, extra?: Record<string, unknown>) => void;
 
 /** Logs single-line JSON with ts/level, before `log_level` filtering is known. Never a secret/token. */
 const bootLogger: Logger = (level, msg, extra) =>
@@ -67,6 +72,68 @@ function readCaPem(): string | null {
   }
 }
 
+export interface PatchAccumulator {
+  /** Merges an incoming state patch into whatever's pending (deep-merging the known nested columns). */
+  merge(patch: Record<string, unknown>): void;
+  /** Flushes whatever's pending via `sink.mergeState`, or no-ops if nothing is pending. Never throws. */
+  flush(): Promise<void>;
+}
+
+/**
+ * Accumulates `vehicle_state` patches between flush ticks and merges them
+ * into one `sink.mergeState` call. Pulled out of `main()` as its own small
+ * factory so shutdown's "flush everything pending" sequence is unit
+ * testable with a fake sink, without having to import (and thereby run)
+ * `main()` itself.
+ */
+export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: Health, log: Logger): PatchAccumulator {
+  let pendingPatch: Record<string, unknown> = {};
+
+  return {
+    merge(patch: Record<string, unknown>): void {
+      pendingPatch = mergePatch(pendingPatch, patch);
+    },
+    async flush(): Promise<void> {
+      if (Object.keys(pendingPatch).length === 0) return;
+      const patch = pendingPatch;
+      pendingPatch = {};
+      try {
+        await sink.mergeState(patch);
+      } catch (err) {
+        // Drop the failed patch rather than re-queuing it behind whatever's
+        // accumulated since: an old patch re-merged later could overwrite
+        // newer state with stale values. Each tick's accumulator only ever
+        // holds what arrived since the last successful (or dropped) flush.
+        health.patchFailed(err);
+        log("error", "mergeState failed, dropping patch", { error: errMsg(err) });
+      }
+    },
+  };
+}
+
+/**
+ * Shutdown-time "flush everything pending" sequence: rows first, then the
+ * pending state patch — always both, regardless of whether the row flush
+ * succeeded. `Batcher.flush()` never throws (it reports `{ ok, error }`),
+ * but this still guards against an unexpected throw from a non-Batcher
+ * `rowBatcher` so shutdown always reaches the patch flush.
+ */
+export async function runShutdownFlush(
+  rowBatcher: { flush(): Promise<{ ok: boolean; error?: unknown }> } | null,
+  patchAccumulator: PatchAccumulator | null,
+  log: Logger,
+): Promise<void> {
+  try {
+    const result = await rowBatcher?.flush();
+    if (result && !result.ok) {
+      log("error", "final flush failed", { error: errMsg(result.error) });
+    }
+  } catch (err) {
+    log("error", "final flush failed", { error: errMsg(err) });
+  }
+  await patchAccumulator?.flush();
+}
+
 async function main(): Promise<void> {
   // SIGTERM/SIGINT must be wired before anything else below can block for a
   // long time (loadOptions, the vehicle-resolve retry loop, or — formerly —
@@ -79,6 +146,7 @@ async function main(): Promise<void> {
   let shuttingDown = false;
   let mqttSource: MqttSource | null = null;
   let rowBatcher: Batcher<SignalRow> | null = null;
+  let patchAccumulator: PatchAccumulator | null = null;
   let flushTimer: NodeJS.Timeout | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let budgetTimer: NodeJS.Timeout | null = null;
@@ -92,14 +160,11 @@ async function main(): Promise<void> {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (budgetTimer) clearInterval(budgetTimer);
     mqttSource?.stop();
-    try {
-      // Waits for any flush already in flight, then flushes everything
-      // still pending — never drops rows just because shutdown landed
-      // mid-tick.
-      await rowBatcher?.flush();
-    } catch (err) {
-      log("error", "final flush failed", { error: errMsg(err) });
-    }
+    // Waits for any row flush already in flight, then flushes everything
+    // still pending — rows AND the pending state patch — never dropping
+    // either just because shutdown landed mid-tick. Exits 0 regardless of
+    // whether the flush succeeded; a failure was already logged above.
+    await runShutdownFlush(rowBatcher, patchAccumulator, log);
     process.exit(0);
   }
 
@@ -138,23 +203,8 @@ async function main(): Promise<void> {
   });
   const activeRowBatcher = rowBatcher;
 
-  let pendingPatch: Record<string, unknown> = {};
-
-  async function flushPendingPatch(): Promise<void> {
-    if (Object.keys(pendingPatch).length === 0) return;
-    const patch = pendingPatch;
-    pendingPatch = {};
-    try {
-      await sink.mergeState(patch);
-    } catch (err) {
-      // Drop the failed patch rather than re-queuing it behind whatever's
-      // accumulated since: an old patch re-merged later could overwrite
-      // newer state with stale values. Each tick's accumulator only ever
-      // holds what arrived since the last successful (or dropped) flush.
-      health.patchFailed(err);
-      log("error", "mergeState failed, dropping patch", { error: errMsg(err) });
-    }
-  }
+  patchAccumulator = createPatchAccumulator(sink, health, log);
+  const activePatchAccumulator = patchAccumulator;
 
   function onEvent(ev: BridgeEvent): void {
     health.received();
@@ -165,7 +215,7 @@ async function main(): Promise<void> {
     if (ev.kind === "field" && vehicle) {
       activeRowBatcher.push(toSignalRow(ev, vehicle.vehicleId, vehicle.ownerId));
     }
-    pendingPatch = mergePatch(pendingPatch, toStatePatch(ev) as Record<string, unknown>);
+    activePatchAccumulator.merge(toStatePatch(ev) as Record<string, unknown>);
   }
 
   mqttSource = startMqttSource({
@@ -177,8 +227,9 @@ async function main(): Promise<void> {
     onEvent,
     onStatus: (status, detail) => {
       if (status === "error") {
-        health.patchFailed(detail);
-        log("error", "mqtt status", { status, detail: detail instanceof Error ? detail.message : String(detail) });
+        const message = detail instanceof Error ? detail.message : String(detail);
+        health.mqttError(message);
+        log("error", "mqtt status", { status, detail: message });
       } else {
         log("debug", "mqtt status", { status });
       }
@@ -201,7 +252,17 @@ async function main(): Promise<void> {
 
   async function flushTick(force: boolean): Promise<void> {
     await activeRowBatcher.flushIfDue(force ? Date.now() + FORCE_FLUSH_AHEAD_MS : Date.now());
-    await flushPendingPatch();
+    await activePatchAccumulator.flush();
+  }
+
+  function logEnsureResult(result: EnsureResult): void {
+    if (result.changed) {
+      log("info", "telemetry config ensure", { result });
+    } else if (ROUTINE_ENSURE_REASONS.has(result.reason)) {
+      log("debug", "telemetry config ensure skipped", { result });
+    } else {
+      log("warning", "telemetry config ensure not synced", { result });
+    }
   }
 
   async function runBudgetPoll(): Promise<void> {
@@ -228,11 +289,7 @@ async function main(): Promise<void> {
     }
     try {
       const result = await telemetryManager.ensure(resolved.budgetMode as BudgetMode, { fqdn, caPem });
-      if ("skipped" in result) {
-        log("debug", "telemetry config ensure skipped", { result });
-      } else if (result.changed) {
-        log("info", "telemetry config ensure", { result });
-      }
+      logEnsureResult(result);
     } catch (err) {
       log("error", "telemetry config ensure failed", { error: errMsg(err) });
     }
@@ -266,7 +323,13 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-main().catch((err) => {
-  console.error(JSON.stringify({ ts: new Date().toISOString(), level: "error", msg: "ingest fatal", error: errMsg(err) }));
-  process.exit(1);
-});
+// Guarded so importing this module under Vitest (e.g. to unit-test
+// `createPatchAccumulator`/`runShutdownFlush`) never kicks off the real
+// add-on process. Vitest sets `process.env.VITEST` itself; production never
+// has it set.
+if (!process.env.VITEST) {
+  main().catch((err) => {
+    console.error(JSON.stringify({ ts: new Date().toISOString(), level: "error", msg: "ingest fatal", error: errMsg(err) }));
+    process.exit(1);
+  });
+}

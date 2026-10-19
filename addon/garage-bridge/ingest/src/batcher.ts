@@ -67,31 +67,36 @@ export class Batcher<T> {
    * Forces a flush of everything currently pending, regardless of
    * maxRows/maxAgeMs. Waits for a flush already in flight (from a concurrent
    * `flushIfDue` tick) to finish first, so a shutdown-time flush never races
-   * a periodic one — it simply runs right after.
+   * a periodic one — it simply runs right after. Never throws: reports
+   * `{ ok: false, error }` instead, so a shutdown sequence can log the
+   * failure and still go on to flush other state (e.g. a pending patch)
+   * rather than being aborted by an unhandled rejection.
    */
-  async flush(): Promise<void> {
+  async flush(): Promise<{ ok: boolean; error?: unknown }> {
     if (this.flushingPromise) {
       await this.flushingPromise.catch(() => {});
     }
-    if (this.buffer.length === 0) return;
-    await this.runFlush();
+    if (this.buffer.length === 0) return { ok: true };
+    return await this.runFlush();
   }
 
   stats(): BatcherStats {
     return { pending: this.buffer.length, dropped: this.droppedCount, flushed: this.flushedCount };
   }
 
-  private async runFlush(dropStaleAt?: number): Promise<void> {
+  private async runFlush(dropStaleAt?: number): Promise<{ ok: boolean; error?: unknown }> {
     const batch = this.buffer;
     this.buffer = [];
+    let outcome: { ok: boolean; error?: unknown } = { ok: true };
 
     const task = (async () => {
       try {
         await this.onFlush(batch.map((e) => e.item));
         this.flushedCount += batch.length;
-      } catch {
+      } catch (err) {
         this.buffer = batch.concat(this.buffer);
         if (dropStaleAt !== undefined) this.dropStale(dropStaleAt);
+        outcome = { ok: false, error: err };
       }
     })();
 
@@ -99,8 +104,12 @@ export class Batcher<T> {
     try {
       await task;
     } finally {
-      this.flushingPromise = null;
+      // Only clear the pointer if it's still ours: a flush this call didn't
+      // start (shouldn't happen given the single-flight design, but this
+      // guards against ever clobbering a newer flush's in-flight marker).
+      if (this.flushingPromise === task) this.flushingPromise = null;
     }
+    return outcome;
   }
 
   private isDue(now: number): boolean {

@@ -8,6 +8,7 @@ export interface BridgeHealthPayload {
   active_alerts: string[];
   last_error: string | null;
   last_vehicle_error: string | null;
+  last_mqtt_error: string | null;
 }
 
 /**
@@ -25,6 +26,7 @@ export class Health {
   private readonly activeAlerts = new Set<string>();
   private lastErrorMessage: string | null = null;
   private lastVehicleErrorMessage: string | null = null;
+  private lastMqttErrorMessage: string | null = null;
 
   received(): void {
     this.receivedCount++;
@@ -47,6 +49,11 @@ export class Health {
   /** Records a vehicle-reported `errors/<name>` event without counting it as a patch failure. */
   vehicleError(name: string, body: string): void {
     this.lastVehicleErrorMessage = `${name}: ${body}`;
+  }
+
+  /** Records an MQTT transport-level status error, distinct from a state-patch failure. */
+  mqttError(message: string): void {
+    this.lastMqttErrorMessage = message;
   }
 
   connectivity(status: string): void {
@@ -73,6 +80,7 @@ export class Health {
       active_alerts: Array.from(this.activeAlerts),
       last_error: this.lastErrorMessage,
       last_vehicle_error: this.lastVehicleErrorMessage,
+      last_mqtt_error: this.lastMqttErrorMessage,
     };
   }
 }
