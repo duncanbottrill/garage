@@ -1,0 +1,61 @@
+#!/command/with-contenv bashio
+# Renders /data/config.json for fleet-telemetry from add-on options.
+# Always listens on 0.0.0.0:8443 with the TLS pair tlscert (or, in dev,
+# the harness) places at /data/tls/{server.crt,server.key}; all record
+# streams go to the local Mosquitto over MQTT. Idempotent: overwrites the
+# file on every call (via a temp file + atomic rename) so it's safe to
+# call on every telemetry/run start and every s6 restart. Never logs
+# mqtt_password.
+set -euo pipefail
+
+MQTT_HOST="$(bashio::config 'mqtt_host')"
+MQTT_PORT="$(bashio::config 'mqtt_port')"
+MQTT_USERNAME="$(bashio::config 'mqtt_username')"
+MQTT_PASSWORD="$(bashio::config 'mqtt_password')"
+LOG_LEVEL="$(bashio::config 'log_level')"
+
+CONFIG_PATH=/data/config.json
+TMP_PATH="${CONFIG_PATH}.tmp"
+
+jq -n \
+  --arg host "0.0.0.0" \
+  --argjson port 8443 \
+  --arg cert "/data/tls/server.crt" \
+  --arg key "/data/tls/server.key" \
+  --arg broker "${MQTT_HOST}:${MQTT_PORT}" \
+  --arg client_id "garage-bridge" \
+  --arg username "${MQTT_USERNAME}" \
+  --arg password "${MQTT_PASSWORD}" \
+  --arg topic_base "garage" \
+  --argjson qos 1 \
+  --argjson rate_limit_enabled true \
+  --argjson message_limit 1000 \
+  --argjson message_interval_time 30 \
+  --argjson metrics_port 9090 \
+  --arg log_level "${LOG_LEVEL}" \
+  --argjson json_log_enable true \
+  '
+  {
+    host: $host,
+    port: $port,
+    tls: { server_cert: $cert, server_key: $key },
+    records: { V: ["mqtt"], alerts: ["mqtt"], errors: ["mqtt"], connectivity: ["mqtt"] },
+    mqtt: (
+      { broker: $broker, client_id: $client_id, topic_base: $topic_base, qos: $qos }
+      + (if $username != "" then { username: $username } else {} end)
+      + (if $password != "" then { password: $password } else {} end)
+    ),
+    rate_limit: {
+      enabled: $rate_limit_enabled,
+      message_limit: $message_limit,
+      message_interval_time: $message_interval_time
+    },
+    monitoring: { prometheus_metrics_port: $metrics_port },
+    log_level: $log_level,
+    json_log_enable: $json_log_enable
+  }
+  ' > "${TMP_PATH}"
+mv "${TMP_PATH}" "${CONFIG_PATH}"
+
+# Deliberately omits mqtt_username/mqtt_password from this log line.
+bashio::log.info "wrote ${CONFIG_PATH} (mqtt broker ${MQTT_HOST}:${MQTT_PORT}, log_level ${LOG_LEVEL})"

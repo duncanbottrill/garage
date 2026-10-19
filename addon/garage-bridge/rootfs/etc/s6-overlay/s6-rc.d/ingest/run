@@ -1,4 +1,12 @@
 #!/command/with-contenv bashio
-# placeholder until the real service lands in a later task
-bashio::log.info "ingest: placeholder"
-exec sleep infinity
+# Runs the ingest bundle. Everything else it needs (VIN, Supabase, MQTT
+# host/creds, bridge secret, tailscale_enabled, ...) is read directly from
+# /data/options.json by ingest/src/options.ts; LOG_LEVEL is the one thing
+# it expects as an env var rather than re-deriving it itself.
+set -euo pipefail
+
+LOG_LEVEL="$(bashio::config 'log_level')"
+export LOG_LEVEL
+
+bashio::log.info "ingest: starting"
+exec node /app/ingest/dist/ingest.js

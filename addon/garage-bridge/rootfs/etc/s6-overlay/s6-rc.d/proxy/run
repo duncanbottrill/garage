@@ -1,4 +1,48 @@
 #!/command/with-contenv bashio
-# placeholder until the real service lands in a later task
-bashio::log.info "proxy: placeholder"
-exec sleep infinity
+# Writes the Tesla vehicle-command private key to /data/private-key.pem
+# (600) and runs tesla-http-proxy on 127.0.0.1:4443 for the ingest
+# telemetry-config manager to talk to. tesla_private_key is optional in
+# dev/e2e: when it's empty there is nothing to sign commands with, so we
+# log a clear message and idle rather than crash-looping — the rest of
+# the stack (telemetry, ingest) still comes up without it.
+#
+# The proxy's own HTTPS listener needs its own TLS pair — NOT the Let's
+# Encrypt pair at /data/tls, which belongs to fleet-telemetry and the
+# tailnet FQDN. We generate a self-signed pair into /data/proxy-tls once
+# and reuse it across restarts; the ingest's TelemetryConfigManager
+# already connects to 127.0.0.1:4443 with insecureTls: true, so a
+# self-signed loopback cert is fine.
+#
+# Idempotent: re-writing private-key.pem with the same option value is a
+# no-op in effect, and the proxy-tls pair is only (re)generated when
+# missing.
+set -euo pipefail
+
+PRIVATE_KEY="$(bashio::config 'tesla_private_key')"
+
+if [ -z "${PRIVATE_KEY}" ]; then
+  bashio::log.warning "proxy: tesla_private_key is empty, no vehicle command key configured; idling"
+  exec sleep infinity
+fi
+
+umask 0177
+printf '%s\n' "${PRIVATE_KEY}" > /data/private-key.pem
+chmod 600 /data/private-key.pem
+
+mkdir -p /data/proxy-tls
+if [ ! -s /data/proxy-tls/cert.pem ] || [ ! -s /data/proxy-tls/key.pem ]; then
+  bashio::log.info "proxy: generating self-signed TLS pair for the proxy listener"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj "/CN=garage-bridge" \
+    -keyout /data/proxy-tls/key.pem -out /data/proxy-tls/cert.pem
+  chmod 600 /data/proxy-tls/key.pem
+fi
+
+bashio::log.info "proxy: starting tesla-http-proxy on 127.0.0.1:4443"
+exec tesla-http-proxy \
+  -tls-key /data/proxy-tls/key.pem \
+  -cert /data/proxy-tls/cert.pem \
+  -key-file /data/private-key.pem \
+  -host 127.0.0.1 \
+  -port 4443 \
+  -verbose

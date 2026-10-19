@@ -23,8 +23,13 @@ WORKDIR /src
 COPY addon/garage-bridge/ingest/package.json addon/garage-bridge/ingest/package-lock.json* ./
 RUN npm install --no-audit --no-fund
 COPY addon/garage-bridge/ingest/ ./
-COPY packages/core/ /core/
-ENV CORE_PATH=/core/src/index.ts
+# Nested under /src (not a /core sibling): @garage/core's own runtime deps
+# (@noble/ciphers, imported by crypto.ts via bare subpath specifiers like
+# "@noble/ciphers/chacha") resolve by walking up from the importing file,
+# so core needs to sit somewhere under the directory tree that has
+# node_modules — here, /src/node_modules, installed above.
+COPY packages/core/ /src/core/
+ENV CORE_PATH=/src/core/src/index.ts
 RUN npm run build
 
 # --- runtime ---

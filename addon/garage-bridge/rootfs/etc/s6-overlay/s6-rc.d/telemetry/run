@@ -1,4 +1,25 @@
 #!/command/with-contenv bashio
-# placeholder until the real service lands in a later task
-bashio::log.info "telemetry: placeholder"
-exec sleep infinity
+# Waits for the TLS pair fleet-telemetry listens with — normally written
+# by tlscert from the real Tailscale cert, or (tailscale_enabled: false)
+# mounted directly into /data/tls by the dev/e2e harness — renders
+# /data/config.json, then execs fleet-telemetry. Idempotent: the config
+# is re-rendered from current options on every start/restart, and s6
+# re-execs this script fresh each time, so there's no state to reconcile.
+set -euo pipefail
+
+CERT=/data/tls/server.crt
+KEY=/data/tls/server.key
+
+waited=0
+while [ ! -s "${CERT}" ] || [ ! -s "${KEY}" ]; do
+  if [ "$((waited % 30))" -eq 0 ]; then
+    bashio::log.info "telemetry: waiting for ${CERT} and ${KEY}"
+  fi
+  sleep 2
+  waited=$((waited + 2))
+done
+
+/usr/bin/garage-write-telemetry-config
+
+bashio::log.info "telemetry: starting fleet-telemetry on 0.0.0.0:8443"
+exec fleet-telemetry -config /data/config.json
