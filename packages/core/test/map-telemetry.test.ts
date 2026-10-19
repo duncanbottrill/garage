@@ -17,4 +17,23 @@ describe("telemetrySignalToState", () => {
   it("window signal", () => expect(m("FpWindow", "WindowStatePartiallyOpen", at)).toEqual({ windows: { passenger_front: true } }));
   it("window signal null → {}", () => expect(m("FdWindow", null, at)).toEqual({}));
   it("ChargeAmps", () => expect(m("ChargeAmps", "16", at)).toEqual({ charge_amps: 16 }));
+  describe("no-information values → {}", () => {
+    const fields = ["Soc", "ChargeState", "DetailedChargeState", "HvacPower", "ClimateKeeperMode", "Location", "Gear", "Locked", "SentryMode", "SoftwareUpdateVersion", "DoorState", "FdWindow", "TpmsPressureFl", "ChargeLimitSoc"];
+    for (const f of fields) {
+      it(`${f} null → {}`, () => expect(m(f, null, at)).toEqual({}));
+      it(`${f} undefined → {}`, () => expect(m(f, undefined, at)).toEqual({}));
+    }
+    it("WindowStateUnknown → {}", () => expect(m("FdWindow", "WindowStateUnknown", at)).toEqual({}));
+    it("DoorStateUnknown → {}", () => expect(m("DoorState", "DoorStateUnknown", at)).toEqual({}));
+    it("ShiftStateUnknown → {}", () => expect(m("Gear", "ShiftStateUnknown", at)).toEqual({}));
+    it("ShiftStateSNA → {}", () => expect(m("Gear", "ShiftStateSNA", at)).toEqual({}));
+    it("bare SNA → {}", () => expect(m("Gear", "SNA", at)).toEqual({}));
+    it("DetailedChargeStateUnknown → {}", () => expect(m("DetailedChargeState", "DetailedChargeStateUnknown", at)).toEqual({}));
+    it("HvacPowerStateUnknown → {}", () => expect(m("HvacPower", "HvacPowerStateUnknown", at)).toEqual({}));
+    it("SentryModeStateUnknown → {}", () => expect(m("SentryMode", "SentryModeStateUnknown", at)).toEqual({}));
+    it("ClimateKeeperModeStateUnknown → {}", () => expect(m("ClimateKeeperMode", "ClimateKeeperModeStateUnknown", at)).toEqual({}));
+    it("a real value still maps (WindowStateClosed → closed)", () => expect(m("FdWindow", "WindowStateClosed", at)).toEqual({ windows: { driver_front: false } }));
+    it("HvacPowerStateOff still maps to false", () => expect(m("HvacPower", "HvacPowerStateOff", at)).toEqual({ hvac_on: false }));
+    it("an out-of-range ScheduledChargingStartTime → {} rather than throwing", () => expect(m("ScheduledChargingStartTime", "1e400", at)).toEqual({}));
+  });
 });

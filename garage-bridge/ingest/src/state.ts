@@ -56,6 +56,9 @@ export function toSignalRow(ev: FieldEvent, vehicleId: string, ownerId: string):
 export function toStatePatch(ev: BridgeEvent): Partial<VehicleStateRow> {
   switch (ev.kind) {
     case "field":
+      // `invalid` decodes to null: no information, so no state change
+      // (never a "null" string, all-doors-closed, or `false`).
+      if (ev.value == null) return {};
       return telemetrySignalToState(ev.name, ev.value, ev.at);
     case "connectivity":
       if (ev.status === "CONNECTED") return { sleep_state: "online" };

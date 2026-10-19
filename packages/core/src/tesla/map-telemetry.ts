@@ -2,7 +2,16 @@ import type { VehicleStateRow } from "../types";
 import { milesToKm } from "./map-vehicle-data";
 const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" && !isNaN(+v) ? +v : null);
 const bool = (v: unknown) => (typeof v === "boolean" ? v : v === "true" ? true : v === "false" ? false : null);
+/**
+ * True for values that carry no information about the car: null/undefined
+ * (fleet-telemetry's `invalid`, decoded upstream), the bare `SNA` ("signal
+ * not available"), and enum values ending in `Unknown` or `SNA` (e.g.
+ * `WindowStateUnknown`, `ShiftStateSNA`). Those must leave state untouched
+ * rather than map to a default like "closed", `false` or the string "null".
+ */
+const noInfo = (v: unknown) => v == null || (typeof v === "string" && (v === "SNA" || v === "Unknown" || /^[A-Z][A-Za-z]*(Unknown|SNA)$/.test(v)));
 export function telemetrySignalToState(name: string, value: unknown, at: Date): Partial<VehicleStateRow> {
+  if (noInfo(value)) return {};
   const iso = at.toISOString(); const n = num(value), b = bool(value);
   switch (name) {
     case "Soc": case "BatteryLevel": return n == null ? {} : { soc: n, charge_at: iso };
@@ -11,7 +20,7 @@ export function telemetrySignalToState(name: string, value: unknown, at: Date): 
     case "ACChargingPower": case "DCChargingPower": case "ChargerPower": return n == null ? {} : { charger_power_kw: n };
     case "ChargeLimitSoc": return n == null ? {} : { charge_limit_soc: n };
     case "ChargePortDoorOpen": return b == null ? {} : { charge_port_open: b };
-    case "ScheduledChargingStartTime": return n == null ? {} : { scheduled_charge_at: new Date(n * 1000).toISOString() };
+    case "ScheduledChargingStartTime": { const d = n == null ? null : new Date(n * 1000); return d == null || isNaN(d.getTime()) ? {} : { scheduled_charge_at: d.toISOString() }; }
     case "InsideTemp": return n == null ? {} : { inside_c: n, climate_at: iso };
     case "OutsideTemp": return n == null ? {} : { outside_c: n };
     case "HvacPower": return { hvac_on: value === "HvacPowerStateOn" || value === true };

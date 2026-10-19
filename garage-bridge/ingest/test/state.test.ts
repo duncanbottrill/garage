@@ -137,3 +137,19 @@ describe("toStatePatch", () => {
     expect(toStatePatch(ev)).toEqual({});
   });
 });
+
+describe("toStatePatch: null and Unknown values carry no information", () => {
+  const field = (name: string, value: unknown): BridgeEvent => ({ kind: "field", vin: "VIN1", name, value, at: AT });
+
+  for (const name of ["ChargeState", "DetailedChargeState", "Gear", "SoftwareUpdateVersion", "ClimateKeeperMode", "DoorState", "HvacPower", "SentryMode", "FdWindow", "Locked"]) {
+    it(`${name} with a null value → {}`, () => expect(toStatePatch(field(name, null))).toEqual({}));
+    it(`${name} decoded from "invalid" → {}`, () => expect(toStatePatch(field(name, decodePayload('"invalid"')))).toEqual({}));
+    it(`${name} decoded from {"invalid":true} → {}`, () => expect(toStatePatch(field(name, decodePayload('{"invalid":true}')))).toEqual({}));
+  }
+
+  it("WindowStateUnknown → {} (not 'open')", () => expect(toStatePatch(field("RpWindow", "WindowStateUnknown"))).toEqual({}));
+  it("DoorStateUnknown → {} (not 'all closed' with a fresh body_at)", () => expect(toStatePatch(field("DoorState", "DoorStateUnknown"))).toEqual({}));
+  it("ShiftStateSNA → {}", () => expect(toStatePatch(field("Gear", "ShiftStateSNA"))).toEqual({}));
+  it("a wrapped Unknown enum ({\"windowStateValue\":\"WindowStateUnknown\"}) → {}", () =>
+    expect(toStatePatch(field("FdWindow", decodePayload('{"windowStateValue":"WindowStateUnknown"}')))).toEqual({}));
+});
