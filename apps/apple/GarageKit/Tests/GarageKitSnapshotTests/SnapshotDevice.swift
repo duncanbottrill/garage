@@ -19,6 +19,22 @@ extension ViewImageConfig {
     )
 }
 
+extension ViewImageConfig {
+    /// ``iPhone17ProDark`` at the first accessibility text size (`.accessibilityMedium`, AX1).
+    @MainActor static let iPhone17ProDarkAX1 = ViewImageConfig(
+        safeArea: iPhone17ProDark.safeArea,
+        size: iPhone17ProDark.size ?? CGSize(width: 402, height: 874),
+        traits: UITraitCollection { traits in
+            traits.displayScale = 3
+            traits.userInterfaceIdiom = .phone
+            traits.horizontalSizeClass = .compact
+            traits.verticalSizeClass = .regular
+            traits.userInterfaceStyle = .dark
+            traits.preferredContentSizeCategory = .accessibilityMedium
+        }
+    )
+}
+
 /// The tolerances every Garage snapshot uses.
 enum SnapshotTolerance {
     static let precision: Float = 0.98

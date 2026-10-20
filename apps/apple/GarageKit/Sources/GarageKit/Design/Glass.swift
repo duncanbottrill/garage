@@ -24,8 +24,6 @@ public struct GlassSurface: ViewModifier {
     /// Tint strength.
     public let strength: Strength
 
-    @Environment(\.displayScale) private var displayScale
-
     /// - Parameters:
     ///   - radius: Corner radius, a `Tokens.Radius` value (tile by default).
     ///   - strength: Tint strength (regular by default).
@@ -35,7 +33,19 @@ public struct GlassSurface: ViewModifier {
     }
 
     public func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        content.modifier(GlassShapeSurface(shape: RoundedRectangle(cornerRadius: radius, style: .continuous), strength: strength))
+    }
+}
+
+/// The glass fill and hairline border in any insettable shape; ``GlassSurface`` uses a rounded
+/// rectangle, ``SwiftUI/View/glassCapsule(strength:)`` a continuous capsule.
+struct GlassShapeSurface<S: InsettableShape>: ViewModifier {
+    let shape: S
+    let strength: GlassSurface.Strength
+
+    @Environment(\.displayScale) private var displayScale
+
+    func body(content: Content) -> some View {
         content
             .background {
                 ZStack {
@@ -53,6 +63,12 @@ extension View {
     /// Puts this view on a Garage glass surface. See `GlassSurface`.
     public func glassSurface(radius: CGFloat = Tokens.Radius.tile, strength: GlassSurface.Strength = .regular) -> some View {
         modifier(GlassSurface(radius: radius, strength: strength))
+    }
+
+    /// Puts this view on Garage glass in a continuous capsule, for pills and strips whose corner
+    /// radius (`Tokens.Radius.pill`) is half their height.
+    public func glassCapsule(strength: GlassSurface.Strength = .regular) -> some View {
+        modifier(GlassShapeSurface(shape: Capsule(style: .continuous), strength: strength))
     }
 }
 

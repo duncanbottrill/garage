@@ -1,19 +1,21 @@
 import SwiftUI
 
 /// A pill-shaped glass strip with an icon and one line of copy: the Status banners and command toasts.
-/// With an action, the whole strip is a button and ends in a chevron.
+/// With an action, the whole strip is a button; ``showsChevron`` marks one that navigates.
 struct NoticeStrip: View {
     let icon: Icon.Name
     let tint: Color
     let message: String
+    /// Ends the strip in a chevron: the action goes somewhere (Tailscale), not just dismisses.
+    var showsChevron = false
     var action: (() -> Void)?
 
     var body: some View {
         if let action {
-            Button(action: action) { content(chevron: true) }
+            Button(action: action) { content(chevron: showsChevron) }
                 .buttonStyle(.plain)
         } else {
-            content(chevron: false)
+            content(chevron: showsChevron)
         }
     }
 
@@ -32,7 +34,7 @@ struct NoticeStrip: View {
         }
         .padding(.horizontal, Tokens.Space.l)
         .padding(.vertical, Tokens.Space.m)
-        .glassSurface(radius: Tokens.Radius.pill, strength: .strong)
+        .glassCapsule(strength: .strong)
         .accessibilityElement(children: .combine)
     }
 }
@@ -53,7 +55,7 @@ struct StatusBanner: View {
         case .budget:
             NoticeStrip(icon: .gauge, tint: Tokens.Colors.muted, message: message)
         case .tailscaleOff:
-            NoticeStrip(icon: .circleAlert, tint: Tokens.Colors.warning, message: message, action: onOpenTailscale)
+            NoticeStrip(icon: .circleAlert, tint: Tokens.Colors.warning, message: message, showsChevron: true, action: onOpenTailscale)
                 .accessibilityHint("Opens Tailscale")
         }
     }

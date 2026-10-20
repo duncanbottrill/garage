@@ -8,12 +8,14 @@ import SwiftUI
 /// panel on the trailing side.
 ///
 /// Commands go through ``AppModel/commandClient``. Lock/Unlock flips the lock icon at once
-/// (optimistic) and reverts with the error's copy in a toast if the command fails; Frunk asks first.
+/// (optimistic, ``OptimisticLock``) and reverts with the error's copy in a toast if the command fails;
+/// Frunk asks first.
 public struct StatusView: View {
     /// Narrower than this, the sheet docks to the bottom; wider, it floats beside the map.
-    static let wideLayoutWidth: CGFloat = 700
-    /// How long an optimistic lock state may wait for the row to confirm it after a successful send.
-    static let optimisticHold: Duration = .seconds(30)
+    /// 780 keeps the map at least 420 pt wide beside the widest (420 pt) panel and its margins.
+    static let wideLayoutWidth: CGFloat = 780
+    /// The least map the docked sheet leaves visible below the status bar when it grows.
+    static let minimumMapHeight: CGFloat = 160
     /// How long a command toast stays up.
     static let toastDuration: Duration = .seconds(5)
 
@@ -21,14 +23,6 @@ public struct StatusView: View {
         case app(AppModel)
         /// A fixed screen for snapshots and previews: no clock, no commands, no network.
         case fixed(StatusModel, trail: [TrailPoint], pending: Set<String>)
-    }
-
-    /// A lock or unlock heading for the car: wins over the row until the row agrees, the command
-    /// fails, or ``optimisticHold`` passes after it was sent.
-    private struct LockIntent: Equatable {
-        let id = UUID()
-        let target: Bool
-        var sent = false
     }
 
     private enum Placeholder: String, Identifiable {
@@ -41,7 +35,7 @@ public struct StatusView: View {
     private let onOpenClimate: (() -> Void)?
     private let onOpenCharge: (() -> Void)?
 
-    @State private var lockIntent: LockIntent?
+    @State private var optimisticLock = OptimisticLock()
     @State private var toast: String?
     @State private var confirmingFrunk = false
     @State private var placeholder: Placeholder?
@@ -101,7 +95,7 @@ public struct StatusView: View {
                         vehicle: store.vehicle,
                         now: context.date,
                         reachability: app.commandClient.reachability,
-                        optimisticLocked: lockIntent?.target
+                        optimisticLocked: optimisticLock.target
                     ),
                     trail: trailLoader?.points ?? [],
                     pending: app.commandClient.pending,
@@ -110,7 +104,7 @@ public struct StatusView: View {
             }
             .task(id: store.vehicle?.id) { await loadTrail(app) }
             .onChange(of: store.state?.locationAt) { appendTrailPoint(store.state) }
-            .onChange(of: store.state?.locked) { confirmLock(store.state?.locked) }
+            .onChange(of: store.state?.locked) { optimisticLock.rowChanged(locked: store.state?.locked) }
         case let .fixed(status, trail, pending):
             layout(status, trail: trail, pending: pending, actionsEnabled: true)
                 .environment(\.statusMotion, false)
@@ -130,7 +124,7 @@ public struct StatusView: View {
             if geometry.size.width >= Self.wideLayoutWidth {
                 wide(status, trail: trail, pending: pending, actionsEnabled: actionsEnabled, actions: actions, size: geometry.size)
             } else {
-                docked(status, trail: trail, pending: pending, actionsEnabled: actionsEnabled, actions: actions, safeArea: geometry.safeAreaInsets)
+                docked(status, trail: trail, pending: pending, actionsEnabled: actionsEnabled, actions: actions, size: geometry.size, safeArea: geometry.safeAreaInsets)
             }
         }
         .background(Tokens.Colors.background.ignoresSafeArea())
@@ -139,9 +133,11 @@ public struct StatusView: View {
     /// iPhone: map full-screen behind, sheet docked to the bottom edge, notices just above the sheet.
     private func docked(
         _ status: StatusModel, trail: [TrailPoint], pending: Set<String>, actionsEnabled: Bool,
-        actions: QuickActions.Actions, safeArea: EdgeInsets
+        actions: QuickActions.Actions, size: CGSize, safeArea: EdgeInsets
     ) -> some View {
-        DockedStatusLayout(safeArea: safeArea) { sheetHeight in
+        // The sheet runs from the bottom edge; it may grow (then scroll) until this much map is left.
+        let maxSheet = max(0, size.height + safeArea.bottom - Self.minimumMapHeight)
+        return DockedStatusLayout(maxSheetHeight: maxSheet) { sheetHeight in
             CarMap(model: status, trail: trail, mapEnabled: mapEnabled, obscured: EdgeInsets(top: safeArea.top, leading: 0, bottom: sheetHeight, trailing: 0))
         } visible: {
             ZStack(alignment: .bottom) {
@@ -170,6 +166,7 @@ public struct StatusView: View {
             VStack(alignment: .leading, spacing: Tokens.Space.m) {
                 notices(status)
                 StatusSheet(model: status, pending: pending, actionsEnabled: actionsEnabled, actions: actions, docked: false)
+                    .layoutPriority(1)
                 Spacer(minLength: 0)
             }
             .frame(width: panel)
@@ -196,6 +193,7 @@ public struct StatusView: View {
             }
             if let toast {
                 NoticeStrip(icon: .circleAlert, tint: Tokens.Colors.danger, message: toast) { self.toast = nil }
+                    .accessibilityHint("Dismisses the message")
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -205,31 +203,21 @@ public struct StatusView: View {
     // MARK: Commands
 
     private func toggleLock(_ status: StatusModel) {
-        guard case .app = source else { return }
+        guard case let .app(app) = source else { return }
+        // One lock command at a time: a second tap while one is in flight would flip the icon back.
+        let pending = app.commandClient.pending
+        guard !pending.contains(Command.doorLock.name), !pending.contains(Command.doorUnlock.name) else { return }
         let target = status.lockState != .locked
-        let intent = LockIntent(target: target)
-        lockIntent = intent
+        guard let intent = optimisticLock.begin(target: target) else { return }
         Task {
-            let sent = await perform(target ? .doorLock : .doorUnlock)
-            guard lockIntent?.id == intent.id else { return }
-            switch sent {
-            case nil:
-                lockIntent = nil // failed: revert; the toast says why
-            case false?:
-                lockIntent = nil // the same command was already in flight; that one decides
+            switch await perform(target ? .doorLock : .doorUnlock) {
             case true?:
-                lockIntent?.sent = true
-                if case let .app(app) = source { confirmLock(app.vehicleStore.state?.locked) }
-                try? await Task.sleep(for: Self.optimisticHold)
-                if lockIntent?.id == intent.id { lockIntent = nil }
+                await optimisticLock.sent(intent, rowLocked: app.vehicleStore.state?.locked)
+            case false?, nil:
+                // Failed (the toast says why), or the same command was already in flight.
+                optimisticLock.failed(intent)
             }
         }
-    }
-
-    /// Drops the optimistic lock state once a sent command's result shows up in the row.
-    private func confirmLock(_ locked: Bool?) {
-        guard let intent = lockIntent, intent.sent, locked == intent.target else { return }
-        lockIntent = nil
     }
 
     private func send(_ command: Command) {
@@ -272,9 +260,10 @@ public struct StatusView: View {
 
 /// Lays out the docked (iPhone) Status screen: the map behind everything, the visible part of the map
 /// above the sheet (for notices and the flat-map car), and the sheet on the bottom edge. Measures the
-/// sheet so the map can centre the car in what stays visible.
+/// sheet so the map can centre the car in what stays visible, and caps it at ``maxSheetHeight``.
 private struct DockedStatusLayout<Map: View, Visible: View, Sheet: View>: View {
-    let safeArea: EdgeInsets
+    /// The tallest the sheet may be before its content scrolls.
+    let maxSheetHeight: CGFloat
     @ViewBuilder let map: (CGFloat) -> Map
     @ViewBuilder let visible: Visible
     @ViewBuilder let sheet: Sheet
@@ -285,11 +274,33 @@ private struct DockedStatusLayout<Map: View, Visible: View, Sheet: View>: View {
         VStack(spacing: 0) {
             visible
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            sheet
+            HeightCap(maxHeight: maxSheetHeight) { sheet }
+                // Sized before the map region, so it gets its whole height (up to the cap) first.
+                .layoutPriority(1)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sheetHeight = $0 }
         }
         .ignoresSafeArea(edges: .bottom)
         .background { map(sheetHeight).ignoresSafeArea() }
+    }
+}
+
+/// Offers its content at most `maxHeight` without growing to it (unlike `frame(maxHeight:)`, which
+/// expands to the proposal): the sheet keeps its natural height, and only content taller than the
+/// cap sees the cap, which is when ``StatusSheet`` switches to scrolling.
+private struct HeightCap: Layout {
+    let maxHeight: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        return child.sizeThatFits(capped(proposal))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+    }
+
+    private func capped(_ proposal: ProposedViewSize) -> ProposedViewSize {
+        ProposedViewSize(width: proposal.width, height: min(proposal.height ?? maxHeight, maxHeight))
     }
 }
 

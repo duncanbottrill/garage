@@ -14,13 +14,26 @@ struct StatusSheet: View {
     var bottomInset: CGFloat = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Tokens.Space.l) {
+        // The sheet keeps its natural height; when that is more than the layout allows (large
+        // Dynamic Type, short windows) the same content scrolls inside the allowed height.
+        ViewThatFits(in: .vertical) {
+            content
+            ScrollView { content }
+                .scrollBounceBehavior(.basedOnSize)
+        }
+        .glassSurface(radius: Tokens.Radius.sheet, strength: .strong)
+        // Docked, the glass runs one corner radius past the bottom edge so only the top corners show.
+        .padding(.bottom, docked ? -Tokens.Radius.sheet : 0)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: Tokens.Space.m) {
             if docked {
-                Capsule()
+                Capsule(style: .continuous)
                     .fill(Tokens.Colors.muted.opacity(Tokens.Opacity.accentStroke))
                     .frame(width: 36, height: 4)
                     .frame(maxWidth: .infinity)
-                    .padding(.top, -Tokens.Space.s)
                     .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: Tokens.Space.xs) {
@@ -34,15 +47,13 @@ struct StatusSheet: View {
             Hairline()
             QuickActions(lockState: model.lockState, pending: pending, enabled: actionsEnabled, actions: actions)
         }
-        .padding(Tokens.Space.xl)
-        .padding(.bottom, bottomInset + (docked ? Tokens.Radius.sheet : 0))
-        .glassSurface(radius: Tokens.Radius.sheet, strength: .strong)
-        // Docked, the glass runs one corner radius past the bottom edge so only the top corners show.
-        .padding(.bottom, docked ? -Tokens.Radius.sheet : 0)
+        .padding(.horizontal, Tokens.Space.xl)
+        .padding(.top, docked ? Tokens.Space.s : Tokens.Space.xl)
+        .padding(.bottom, docked ? Tokens.Space.s + bottomInset + Tokens.Radius.sheet : Tokens.Space.xl)
     }
 
     private var tiles: some View {
-        Grid(horizontalSpacing: Tokens.Space.m, verticalSpacing: Tokens.Space.m) {
+        Grid(horizontalSpacing: Tokens.Space.s, verticalSpacing: Tokens.Space.s) {
             GridRow {
                 StatusTile.numeral(
                     title: "Inside", value: model.inside, unit: model.temperatureUnit,

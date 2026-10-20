@@ -11,7 +11,7 @@ import Testing
     private static let now = Date(timeIntervalSince1970: 1_792_506_600)
 
     private enum Screen {
-        case iPhone, mac
+        case iPhone, iPhoneAX1, mac
     }
 
     private func check(_ view: StatusView, on screen: Screen, fileID: StaticString = #fileID, file: StaticString = #filePath, testName: String = #function, line: UInt = #line, column: UInt = #column) {
@@ -25,6 +25,16 @@ import Testing
                     precision: SnapshotTolerance.precision,
                     perceptualPrecision: SnapshotTolerance.perceptualPrecision,
                     layout: .device(config: .iPhone17ProDark)
+                ),
+                fileID: fileID, file: file, testName: testName, line: line, column: column
+            )
+        case .iPhoneAX1:
+            assertSnapshot(
+                of: themed.environment(\.dynamicTypeSize, .accessibility1),
+                as: .image(
+                    precision: SnapshotTolerance.precision,
+                    perceptualPrecision: SnapshotTolerance.perceptualPrecision,
+                    layout: .device(config: .iPhone17ProDarkAX1)
                 ),
                 fileID: fileID, file: file, testName: testName, line: line, column: column
             )
@@ -147,6 +157,9 @@ import Testing
     @Test func status_offline_iphone() { check(status(.offline), on: .iPhone) }
     @Test func status_pending_iphone() { check(status(.pending), on: .iPhone) }
     @Test func status_sparse_iphone() { check(status(.sparse), on: .iPhone) }
+    /// The first accessibility text size: tiles stack their captions, pills drop to the icon above
+    /// or alone, and the sheet scrolls if it outgrows the screen.
+    @Test func status_live_iphone_ax() { check(status(.live), on: .iPhoneAX1) }
 
     // MARK: Mac
 

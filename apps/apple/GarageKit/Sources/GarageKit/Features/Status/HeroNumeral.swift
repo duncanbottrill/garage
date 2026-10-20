@@ -10,7 +10,10 @@ struct HeroNumeral: View {
             if let soc = model.soc {
                 Numeral(value: soc, unit: "%", scale: .numeralHero)
             } else {
-                placeholder(.numeralHero)
+                // A lighter dash than the 84 pt hero's, which reads as a heavy bar, in a hero-tall
+                // line so the sheet does not jump when the first reading arrives.
+                placeholder(.numeralL)
+                    .frame(minHeight: Tokens.Typography.numeralHero.size * Tokens.Typography.numeralHero.lineHeight, alignment: .bottomLeading)
             }
             Spacer(minLength: 0)
             if let range = model.range {

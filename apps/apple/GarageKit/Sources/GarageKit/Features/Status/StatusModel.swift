@@ -52,7 +52,8 @@ public struct StatusModel: Sendable, Equatable {
     public let rangeText: String
     /// "mi" or "km", for the locale.
     public let rangeUnit: String
-    /// "Not charging", "Charging 7.2 kW · 90 % limit", "Scheduled 23:30", or "—" when nothing is known.
+    /// "Charging 7.2 kW · 90 % limit", "Charge complete", "Scheduled 23:30", "Not charging", or "—"
+    /// when nothing is known (in that priority).
     public let chargeLine: String
     /// Inside temperature in the locale's unit, rounded, or nil.
     public let inside: Double?
@@ -215,6 +216,7 @@ public struct StatusModel: Sendable, Equatable {
             if let limit = state.chargeLimitSoc { line += " · \(limit) % limit" }
             return line
         }
+        if state.chargeState?.lowercased() == "complete" { return "Charge complete" }
         if let scheduled = state.scheduledChargeAt, scheduled > now {
             return "Scheduled \(CommandError.clockTime(scheduled, timeZone: timeZone))"
         }

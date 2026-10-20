@@ -28,6 +28,9 @@ import Testing
         state.chargeLimitSoc = 90
         #expect(model(state).chargeLine == "Charging 7.2 kW · 90 % limit")
 
+        state.chargeState = "Complete"
+        #expect(model(state).chargeLine == "Charge complete")
+
         state.chargeState = "Disconnected"
         #expect(model(state).chargeLine == "Not charging")
     }
@@ -190,5 +193,70 @@ import Testing
 
         loader.append(TrailPoint(latitude: 51.6, longitude: -0.1, recordedAt: now), now: now)
         #expect(loader.points.map(\.latitude) == [51.5, 51.6])
+    }
+}
+
+@MainActor @Suite struct OptimisticLockTests {
+    /// A failed command reverts the overlay at once.
+    @Test func revertsOnFailure() {
+        let lock = OptimisticLock()
+        let intent = lock.begin(target: true)
+        #expect(intent != nil)
+        #expect(lock.target == true)
+        lock.failed(intent!)
+        #expect(lock.target == nil)
+    }
+
+    /// A second tap before the first is sent is ignored, so the icon cannot flip back mid-flight.
+    @Test func ignoresSecondTapWhileUnsent() {
+        let lock = OptimisticLock()
+        let first = lock.begin(target: true)
+        #expect(first != nil)
+        #expect(lock.begin(target: false) == nil)
+        #expect(lock.target == true)
+    }
+
+    /// After a successful send the overlay stays until the row agrees, then clears.
+    @Test func confirmsWhenRowMatches() async {
+        let lock = OptimisticLock(hold: .seconds(60))
+        let intent = lock.begin(target: true)!
+        let waiting = Task { await lock.sent(intent, rowLocked: false) }
+        await Task.yield()
+        lock.rowChanged(locked: false)
+        #expect(lock.target == true)
+        lock.rowChanged(locked: true)
+        #expect(lock.target == nil)
+        waiting.cancel()
+    }
+
+    /// Already matching when the send returns: cleared straight away.
+    @Test func confirmsImmediatelyWhenRowAlreadyMatches() async {
+        let lock = OptimisticLock(hold: .seconds(60))
+        let intent = lock.begin(target: false)!
+        let waiting = Task { await lock.sent(intent, rowLocked: false) }
+        await Task.yield()
+        #expect(lock.target == nil)
+        waiting.cancel()
+    }
+
+    /// Without a confirming row the overlay gives up after the hold (30 s in the app).
+    @Test func fallsBackAfterHold() async {
+        #expect(OptimisticLock.defaultHold == .seconds(30))
+        let lock = OptimisticLock(hold: .milliseconds(20))
+        let intent = lock.begin(target: true)!
+        await lock.sent(intent, rowLocked: false)
+        #expect(lock.target == nil)
+    }
+
+    /// A newer intent (after the first was sent) is not cleared by the older one's hold.
+    @Test func newerIntentSurvivesOlderHold() async {
+        let lock = OptimisticLock(hold: .milliseconds(20))
+        let first = lock.begin(target: true)!
+        let waiting = Task { await lock.sent(first, rowLocked: false) }
+        await Task.yield()
+        let second = lock.begin(target: false)
+        #expect(second != nil)
+        await waiting.value
+        #expect(lock.target == false)
     }
 }
