@@ -11,15 +11,45 @@ public protocol VehicleRowFetcher: Sendable {
     func fetchState(vehicleID: UUID) async throws -> VehicleState?
 }
 
+/// The car the owner picked in onboarding, kept in `UserDefaults` under ``key``.
+public enum VehicleSelection {
+    /// The `UserDefaults` key holding the chosen vehicle's id.
+    public static let key = "selectedVehicleID"
+
+    /// The chosen vehicle's id, or nil when none was picked.
+    public static func current(in defaults: UserDefaults = .standard) -> UUID? {
+        defaults.string(forKey: key).flatMap(UUID.init(uuidString:))
+    }
+
+    /// Records `id` as the chosen vehicle, or forgets the choice when nil.
+    public static func set(_ id: UUID?, in defaults: UserDefaults = .standard) {
+        if let id { defaults.set(id.uuidString.lowercased(), forKey: key) } else { defaults.removeObject(forKey: key) }
+    }
+}
+
 /// ``VehicleRowFetcher`` over the Supabase client, decoding with ``GarageJSON/decoder``.
 public struct SupabaseRowFetcher: VehicleRowFetcher {
     let client: SupabaseClient
+    let selectedVehicleID: @Sendable () -> UUID?
 
-    public init(client: SupabaseClient) {
+    /// - Parameters:
+    ///   - client: The Supabase client (RLS scopes rows to the signed-in owner).
+    ///   - selectedVehicleID: The car picked in onboarding; by default ``VehicleSelection/current(in:)``.
+    public init(client: SupabaseClient, selectedVehicleID: @escaping @Sendable () -> UUID? = { VehicleSelection.current() }) {
         self.client = client
+        self.selectedVehicleID = selectedVehicleID
     }
 
     public func fetchVehicle() async throws -> Vehicle? {
+        if let id = selectedVehicleID() {
+            let response = try await client.from("vehicles")
+                .select(Vehicle.selectColumns)
+                .eq("id", value: id.uuidString.lowercased())
+                .limit(1)
+                .execute()
+            if let chosen = try GarageJSON.decoder.decode([Vehicle].self, from: response.data).first { return chosen }
+            // The chosen car is gone (unlinked, or another account's choice): fall back to the first.
+        }
         // Slice 1 is single-vehicle: the first car the owner linked.
         let response = try await client.from("vehicles")
             .select(Vehicle.selectColumns)

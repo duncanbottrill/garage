@@ -73,6 +73,16 @@ import Testing
         #expect(vehicles.first?.displayName == "Ghost")
     }
 
+    @Test func vehicleSyncDecodesConflicts() async throws {
+        stub.on("POST", "/api/vehicles/sync") { _ in
+            .json(200, #"{"vehicles":[],"conflicts":["LRWYGCEK0PC000002"]}"#)
+        }
+
+        let sync = try await api.vehicleSync()
+
+        #expect(sync == VehicleSync(vehicles: [], conflicts: ["LRWYGCEK0PC000002"]))
+    }
+
     @Test func syncVehiclesMaps502NotConnected() async {
         stub.on("POST", "/api/vehicles/sync") { _ in .json(502, #"{"vehicles":[],"conflicts":[],"error":"not_connected"}"#) }
 

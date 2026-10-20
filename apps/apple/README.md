@@ -53,3 +53,28 @@ Call `GarageKit.registerFonts()` once at launch (the app does it in `GarageApp.i
 
 `Garage/Config.plist` holds public values only (Supabase URL and publishable key, API base URL). Never put secrets
 in it.
+
+## Owner setup
+
+One-time steps in the Apple developer portal and the Supabase dashboard. The app compiles and its tests run
+without them; only real sign-in needs them.
+
+1. **Sign in with Apple in Supabase** (Authentication → Sign In / Providers → Apple): enable the provider and put
+   `com.duncanbottrill.garage` (the app's bundle id) in "Client IDs", so native ID tokens from the iPhone and Mac
+   app are accepted. For the web flow, also create the Services ID `com.duncanbottrill.garage.signin` and add the
+   Team ID, Key ID and `.p8` key from the developer portal (Certificates, Identifiers & Profiles → Keys, with Sign
+   in with Apple enabled). The App ID `com.duncanbottrill.garage` needs the Sign in with Apple capability.
+2. **Manual linking** (Authentication → Sign In / Providers → "Allow manual linking"): turn it on. "Link Apple ID"
+   in More calls `linkIdentityWithIdToken`, which Supabase refuses while manual linking is off.
+3. **Keep email/password enabled** for the bootstrap account until "Link Apple ID" has been run once on the owner's
+   device. After that, Sign in with Apple reaches the same account (and the same car).
+
+### How sign-in works
+
+- Sign in with Apple runs natively (`SignInWithAppleButton`, or `ASAuthorizationController` for linking) with a
+  random nonce: Apple gets its SHA-256, Supabase gets the raw value with the ID token (`signInWithIdToken`).
+- "Use email" on the sign-in step is the owner's bootstrap account (`signIn(email:password:)`).
+- Connect Tesla opens `POST /auth/start`'s URL in `ASWebAuthenticationSession`; the backend redirects to
+  `garage://connected?ok=1` (or `?error=…`), which re-runs the onboarding checks.
+- Sign out is local to the device. It clears the snapshot cache (it holds the car's location), the chosen vehicle
+  (`selectedVehicleID`) and the onboarding-completed flag.

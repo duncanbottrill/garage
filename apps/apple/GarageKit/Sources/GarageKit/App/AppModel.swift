@@ -1,0 +1,324 @@
+import AuthenticationServices
+import Foundation
+import Observation
+import os
+import Supabase
+
+/// The app's root object: the Supabase client, the vehicle store, the command client and the
+/// onboarding flow, plus the account actions (sign in, link Apple ID, sign out).
+///
+/// Create one at launch, call ``launch()`` once, and forward every opened URL to ``handle(url:)``.
+@MainActor
+@Observable
+public final class AppModel {
+    /// The Supabase project and API endpoints.
+    @ObservationIgnored public let environment: SupabaseEnvironment
+    /// The Garage backend, authenticated with the Supabase session.
+    @ObservationIgnored public let api: GarageAPI
+    /// Decides which onboarding step to show; ``OnboardingFlow/Step/done`` means the app proper.
+    @ObservationIgnored public let flow: OnboardingFlow
+
+    /// The car's live state. Replaced on sign-out, so read it from here rather than keeping a reference.
+    public private(set) var vehicleStore: VehicleStore
+    /// Sends commands through the bridge's proxy. Replaced on sign-out (its Tesla token goes with it).
+    public private(set) var commandClient: CommandClient
+    /// The signed-in Supabase user, or nil when signed out.
+    public private(set) var user: User?
+    /// True while a sign-in, Tesla connection or vehicle choice is running.
+    public private(set) var isWorking = false
+
+    /// The Supabase client the app shares.
+    public var client: SupabaseClient { environment.client }
+    /// The account's email, when it has one (Apple may give a private relay address).
+    public var accountEmail: String? { user?.email }
+    /// Whether the account can sign in with Apple. When false, More offers "Link Apple ID".
+    public var hasAppleIdentity: Bool { Self.hasAppleIdentity(user) }
+
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let cache: FileSnapshotCache
+    @ObservationIgnored private let appleAuthorizer = AppleAuthorizer()
+    @ObservationIgnored private let webAuthenticator = WebAuthenticator()
+    /// The nonce for the Sign in with Apple button's request, between `onRequest` and `onCompletion`.
+    @ObservationIgnored private var pendingNonce: AppleNonce?
+    @ObservationIgnored private var authTask: Task<Void, Never>?
+    @ObservationIgnored private var reachabilityRunning = false
+
+    /// The app's model on the shared environment (`Config.plist`).
+    public convenience init() {
+        self.init(environment: .shared)
+    }
+
+    /// - Parameters:
+    ///   - environment: The Supabase project and API.
+    ///   - defaults: Where the chosen vehicle and onboarding completion are kept.
+    ///   - cache: The snapshot cache the store opens on, cleared on sign-out.
+    public init(environment: SupabaseEnvironment, defaults: UserDefaults = .standard, cache: FileSnapshotCache = FileSnapshotCache()) {
+        let owner = WeakModel()
+        self.environment = environment
+        self.defaults = defaults
+        self.cache = cache
+        api = GarageAPI(environment: environment)
+        vehicleStore = Self.makeStore(environment: environment, cache: cache, defaults: defaults)
+        commandClient = Self.makeCommandClient(api: api, owner: owner)
+        user = environment.client.auth.currentUser
+        // A session and a finished onboarding on this device: open on Status (and its cached snapshot)
+        // straight away; the first evaluation moves elsewhere only if something has changed.
+        let resume = environment.client.auth.currentSession != nil && OnboardingFlow.hasCompleted(in: defaults)
+        flow = OnboardingFlow(step: resume ? .done : .signIn, checks: Self.checks(owner: owner), defaults: defaults)
+        owner.model = self
+    }
+
+    // MARK: Lifecycle
+
+    /// Starts following auth changes and runs the first onboarding evaluation. Call once, at launch.
+    public func launch() async {
+        observeAuth()
+        await refresh()
+    }
+
+    /// Re-runs the onboarding checks, then starts the proxy probe loop once onboarding is done.
+    public func refresh() async {
+        await flow.evaluate()
+        startMonitoringIfDone()
+    }
+
+    /// Handles a URL opened by the app (`onOpenURL`). `garage://connected` re-evaluates onboarding.
+    public func handle(url: URL) {
+        Task { await handleCallback(url) }
+    }
+
+    // MARK: Sign in
+
+    /// For the Sign in with Apple button's `onRequest`: email scope and a fresh hashed nonce.
+    public func prepareAppleRequest(_ request: ASAuthorizationAppleIDRequest) {
+        let nonce = AppleNonce.random()
+        pendingNonce = nonce
+        AppleCredential.prepare(request, nonce: nonce)
+    }
+
+    /// For the Sign in with Apple button's `onCompletion`: signs in to Supabase with the ID token.
+    public func completeAppleSignIn(_ result: Result<ASAuthorization, any Error>) async {
+        let nonce = pendingNonce
+        pendingNonce = nil
+        switch result {
+        case .success(let authorization):
+            await perform {
+                guard let nonce else { throw AppleSignInError.missingNonce }
+                try await self.signInToSupabase(idToken: AppleCredential.idToken(from: authorization), nonce: nonce)
+            }
+        case .failure(let error):
+            if !AppleCredential.isCancellation(error) { flow.report(error) }
+        }
+    }
+
+    /// Sign in with Apple without the button: shows the Apple sheet, then signs in to Supabase with
+    /// `signInWithIdToken(credentials: .init(provider: .apple, idToken:, nonce:))`.
+    public func signInWithApple() async {
+        await perform {
+            let nonce = AppleNonce.random()
+            let idToken = try await self.appleAuthorizer.idToken(nonce: nonce)
+            try await self.signInToSupabase(idToken: idToken, nonce: nonce)
+        }
+    }
+
+    /// Email and password sign-in, for the owner's bootstrap account (until Apple ID is linked to it).
+    public func signIn(email: String, password: String) async {
+        await perform {
+            let session = try await self.client.auth.signIn(email: email.trimmingCharacters(in: .whitespaces), password: password)
+            self.user = session.user
+            await self.refresh()
+        }
+    }
+
+    /// Links an Apple ID to the signed-in account (from More), so the next sign-in can use Apple.
+    ///
+    /// Runs Sign in with Apple natively, then `linkIdentityWithIdToken` with the ID token and nonce.
+    /// Needs "Manual linking" enabled in Supabase Auth.
+    /// - Throws: `ASAuthorizationError` (`.canceled` when the sheet is dismissed) or a Supabase `AuthError`.
+    public func linkApple() async throws {
+        let nonce = AppleNonce.random()
+        let idToken = try await appleAuthorizer.idToken(nonce: nonce)
+        let session = try await client.auth.linkIdentityWithIdToken(
+            credentials: OpenIDConnectCredentials(provider: .apple, idToken: idToken, nonce: nonce.raw)
+        )
+        user = (try? await client.auth.user()) ?? session.user
+    }
+
+    /// Signs out of this device only (the owner's other devices stay signed in), clears the snapshot
+    /// cache (it holds the car's location), forgets the chosen vehicle and returns to the sign-in step.
+    public func signOut() async {
+        do {
+            try await client.auth.signOut(scope: .local)
+        } catch {
+            // The local session is removed before the network call, so this is only the server side.
+            Self.logger.error("Sign-out request failed: \(error.localizedDescription, privacy: .public)")
+        }
+        resetAfterSignOut()
+    }
+
+    // MARK: Tesla
+
+    /// Opens the Tesla sign-in (`POST /auth/start`) in `ASWebAuthenticationSession`; the backend
+    /// redirects to `garage://connected`, which re-evaluates onboarding.
+    public func connectTesla() async {
+        await perform {
+            let url = try await self.api.authStart()
+            do {
+                let callback = try await self.webAuthenticator.authenticate(url: url, callbackURLScheme: "garage")
+                await self.handleCallback(callback)
+            } catch where WebAuthenticator.isCancellation(error) {
+                return
+            }
+        }
+    }
+
+    // MARK: Vehicle
+
+    /// Imports the Tesla account's cars (`POST /api/vehicles/sync`) for the vehicle step. The rows are
+    /// for picking only: the store fetches the full row once one is chosen.
+    public func loadVehicleChoices() async throws -> VehicleSync {
+        try await api.vehicleSync()
+    }
+
+    /// Makes `vehicle` the car Garage shows (`UserDefaults` `selectedVehicleID`), restarts the store on
+    /// it and moves onboarding on.
+    public func choose(_ vehicle: Vehicle) async {
+        await perform {
+            VehicleSelection.set(vehicle.id, in: self.defaults)
+            await self.vehicleStore.start()
+            await self.refresh()
+        }
+    }
+
+    // MARK: Internals
+
+    /// `flow.handle(url:)` evaluates once itself (and keeps a callback `error` on screen), so no second refresh.
+    private func handleCallback(_ url: URL) async {
+        guard await flow.handle(url: url) else { return }
+        startMonitoringIfDone()
+    }
+
+    private func startMonitoringIfDone() {
+        guard flow.step == .done, !reachabilityRunning else { return }
+        reachabilityRunning = true
+        commandClient.reachabilityMonitor.start()
+    }
+
+    private func signInToSupabase(idToken: String, nonce: AppleNonce) async throws {
+        let session = try await client.auth.signInWithIdToken(
+            credentials: OpenIDConnectCredentials(provider: .apple, idToken: idToken, nonce: nonce.raw)
+        )
+        user = session.user
+        await refresh()
+    }
+
+    /// Runs an action with ``isWorking`` set, reporting a failure (other than a cancelled Apple sheet)
+    /// on the current step.
+    private func perform(_ action: @MainActor () async throws -> Void) async {
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            try await action()
+        } catch {
+            if !AppleCredential.isCancellation(error) { flow.report(error) }
+        }
+    }
+
+    private func observeAuth() {
+        guard authTask == nil else { return }
+        let changes = client.auth.authStateChanges
+        authTask = Task { [weak self] in
+            for await (event, session) in changes {
+                guard let self else { return }
+                switch event {
+                case .signedOut:
+                    if self.user != nil || self.flow.step != .signIn { self.resetAfterSignOut() }
+                default:
+                    self.user = session?.user
+                }
+            }
+        }
+    }
+
+    /// Drops everything that belongs to the signed-out account. Safe to call more than once.
+    private func resetAfterSignOut() {
+        vehicleStore.stop()
+        commandClient.reachabilityMonitor.stop()
+        reachabilityRunning = false
+        cache.clear()
+        VehicleSelection.set(nil, in: defaults)
+        OnboardingFlow.resetCompletion(in: defaults)
+        // Fresh instances: the store's in-memory state and the client's cached Tesla token go too.
+        let owner = WeakModel()
+        owner.model = self
+        vehicleStore = Self.makeStore(environment: environment, cache: cache, defaults: defaults)
+        commandClient = Self.makeCommandClient(api: api, owner: owner)
+        user = nil
+        flow.reset()
+    }
+
+    private static func makeStore(environment: SupabaseEnvironment, cache: FileSnapshotCache, defaults: UserDefaults) -> VehicleStore {
+        let defaultsBox = UncheckedDefaults(defaults)
+        return VehicleStore(
+            feed: SupabaseRealtimeFeed(client: environment.client),
+            fetcher: SupabaseRowFetcher(client: environment.client) { VehicleSelection.current(in: defaultsBox.defaults) },
+            cache: cache
+        )
+    }
+
+    private static func makeCommandClient(api: GarageAPI, owner: WeakModel) -> CommandClient {
+        // Task 9 adds the More override (`proxyBaseURLOverride`) in front of the published URL.
+        CommandClient(api: api) { owner.model?.vehicleStore.vehicle?.proxyBaseURL }
+    }
+
+    private static func checks(owner: WeakModel) -> OnboardingFlow.Checks {
+        OnboardingFlow.Checks(
+            hasSession: {
+                guard let model = owner.model else { return false }
+                do {
+                    _ = try await model.client.auth.session
+                    return true
+                } catch AuthError.sessionMissing {
+                    return false
+                }
+            },
+            isTeslaConnected: {
+                guard let model = owner.model else { return false }
+                return try await model.api.connection().connected
+            },
+            vehicle: {
+                guard let model = owner.model else { return nil }
+                if let vehicle = model.vehicleStore.vehicle { return vehicle }
+                // A throwing fetch first: the store swallows errors, and a network failure must not
+                // read as "no vehicle".
+                let defaultsBox = UncheckedDefaults(model.defaults)
+                let fetcher = SupabaseRowFetcher(client: model.client) { VehicleSelection.current(in: defaultsBox.defaults) }
+                guard let found = try await fetcher.fetchVehicle() else { return nil }
+                await model.vehicleStore.start()
+                return model.vehicleStore.vehicle ?? found
+            },
+            proxyReachability: {
+                guard let model = owner.model else { return .unknown }
+                return await model.commandClient.reachabilityMonitor.check()
+            }
+        )
+    }
+
+    static func hasAppleIdentity(_ user: User?) -> Bool {
+        user?.identities?.contains { $0.provider == "apple" } ?? false
+    }
+
+    private static let logger = Logger(subsystem: "com.duncanbottrill.garage", category: "AppModel")
+}
+
+/// Lets closures made during `init` reach the model without a retain cycle.
+@MainActor
+private final class WeakModel {
+    weak var model: AppModel?
+}
+
+/// `UserDefaults` is documented as thread-safe; this carries one into a `@Sendable` closure.
+private struct UncheckedDefaults: @unchecked Sendable {
+    let defaults: UserDefaults
+    init(_ defaults: UserDefaults) { self.defaults = defaults }
+}

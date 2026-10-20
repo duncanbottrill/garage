@@ -80,6 +80,27 @@ public struct ConnectionHealth: Decodable, Sendable, Equatable {
     }
 }
 
+/// The answer of `POST /api/vehicles/sync`.
+public struct VehicleSync: Decodable, Sendable, Equatable {
+    /// This owner's vehicles after the import (only `id`, `vin` and `display_name` are filled in).
+    public var vehicles: [Vehicle]
+    /// VINs on the Tesla account that were skipped because another Garage account already owns them.
+    public var conflicts: [String]
+
+    public init(vehicles: [Vehicle], conflicts: [String] = []) {
+        self.vehicles = vehicles
+        self.conflicts = conflicts
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        vehicles = try c.decode([Vehicle].self, forKey: .vehicles)
+        conflicts = try c.decodeIfPresent([String].self, forKey: .conflicts) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey { case vehicles, conflicts }
+}
+
 /// A typed failure from the Garage backend. Transport failures (no network) arrive as `URLError`.
 public enum APIError: Error, Sendable, Equatable, LocalizedError {
     /// The Supabase session was refused (401). Sign in again.
@@ -151,9 +172,16 @@ public struct GarageAPI: Sendable {
     }
 
     /// `POST /api/vehicles/sync`: imports the Tesla account's vehicles and returns this owner's rows.
+    ///
+    /// The rows carry only `id`, `vin` and `display_name`: use them to pick a car, never as the
+    /// ``VehicleStore``'s vehicle.
     public func syncVehicles() async throws -> [Vehicle] {
-        struct Body: Decodable { var vehicles: [Vehicle] }
-        return try await request("POST", "api/vehicles/sync", as: Body.self).vehicles
+        try await vehicleSync().vehicles
+    }
+
+    /// `POST /api/vehicles/sync` with the VINs the backend skipped because another Garage account owns them.
+    public func vehicleSync() async throws -> VehicleSync {
+        try await request("POST", "api/vehicles/sync", as: VehicleSync.self)
     }
 
     /// `POST /api/vehicle-data`: one billed `vehicle_data` read ("Refresh now"), merged into
