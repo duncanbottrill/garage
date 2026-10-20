@@ -55,15 +55,25 @@ public final class UsageReporter: Sendable {
         }
     }
 
+    /// Transport failures, 5xx and 429 are worth another try; other 4xx answers are not.
+    static func isRetryable(_ error: any Error) -> Bool {
+        guard let error = error as? APIError else { return true }
+        switch error {
+        case .rateLimited, .tokenUnavailable: return true
+        case let .server(status): return !(400..<500).contains(status)
+        case .unauthorized, .notConnected, .asleep, .budgetMinimal: return false
+        }
+    }
+
     private func deliver(_ category: UsageCategory, count: Int) async {
         var delay = retryDelay
         for attempt in 1...attempts {
             do {
                 try await send(category, count)
                 return
-            } catch APIError.unauthorized {
-                // No session: retrying cannot help.
-                Self.log.error("usage report \(category.rawValue, privacy: .public) x\(count) dropped: session refused")
+            } catch where !Self.isRetryable(error) {
+                // A client error (bad request, no session): the same report would be refused again.
+                Self.log.error("usage report \(category.rawValue, privacy: .public) x\(count) dropped: \(error.localizedDescription, privacy: .public)")
                 return
             } catch {
                 guard attempt < attempts else {

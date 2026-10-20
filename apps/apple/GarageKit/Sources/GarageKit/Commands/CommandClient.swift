@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import Synchronization
 
 /// Sends signed vehicle commands through the bridge's `tesla-http-proxy` over the tailnet.
 ///
@@ -9,8 +10,9 @@ import Observation
 ///
 /// Rules, per command:
 /// - One in flight per command ``Command/name``: a second tap while the first is pending is ignored
-///   and its `send` returns without throwing (no second request, no second usage report).
-/// - The whole exchange (token, request, one retry) is bounded by ``defaultTimeout`` (10 s).
+///   and its `send` returns `false` without throwing (no second request, no second usage report).
+/// - The whole exchange (token, request, one retry) is bounded by ``defaultTimeout`` (10 s): `send`
+///   throws ``CommandError/timeout`` at the deadline even if the token fetch or the proxy never answers.
 /// - A 401 from the proxy forces one token refresh and one retry; a second 401 is ``CommandError/unauthorized``.
 /// - Each success is reported to the usage ledger (`commands`, or `wakes` for ``wake(vin:)``) in the
 ///   background; failures to report are logged by ``UsageReporter``, not surfaced.
@@ -67,23 +69,27 @@ public final class CommandClient {
 
     /// Sends `command` to the car with this VIN and counts it in the usage ledger on success.
     ///
-    /// Returns without doing anything while the same command is already in flight.
-    /// - Throws: ``CommandError``.
-    public func send(_ command: Command, vin: String) async throws {
+    /// - Returns: `true` when the command was sent and carried out; `false` when it was ignored because
+    ///   the same command is already in flight.
+    /// - Throws: ``CommandError``, and nothing else.
+    @discardableResult
+    public func send(_ command: Command, vin: String) async throws -> Bool {
         try await run(key: command.name, path: "api/1/vehicles/\(vin)/command/\(command.name)", body: command.body, kind: .command)
     }
 
     /// Wakes the car (`wake_up`) and counts one wake. Call only after the user has confirmed: a wake is
     /// billed at 20× a command, and Garage never wakes the car on its own.
-    /// - Throws: ``CommandError``.
-    public func wake(vin: String) async throws {
+    /// - Returns: `false` when a wake is already in flight (nothing sent), `true` otherwise.
+    /// - Throws: ``CommandError``, and nothing else.
+    @discardableResult
+    public func wake(vin: String) async throws -> Bool {
         try await run(key: "wake_up", path: "api/1/vehicles/\(vin)/wake_up", body: [:], kind: .wake)
     }
 
     // MARK: Exchange
 
-    private func run(key: String, path: String, body: [String: AnyCodable], kind: ProxyExchange.Kind) async throws {
-        guard !pending.contains(key) else { return }
+    private func run(key: String, path: String, body: [String: AnyCodable], kind: ProxyExchange.Kind) async throws -> Bool {
+        guard !pending.contains(key) else { return false }
         pending.insert(key)
         defer { pending.remove(key) }
 
@@ -96,8 +102,15 @@ public final class CommandClient {
             session: session,
             timeout: timeout
         )
-        try await exchange.run()
+        do {
+            try await exchange.run()
+        } catch let error as CommandError {
+            throw error
+        } catch {
+            throw CommandError.rejected(reason: "Unexpected error: \(error.localizedDescription)")
+        }
         usage.record(kind == .wake ? .wakes : .commands)
+        return true
     }
 
     private static func encode(_ body: [String: AnyCodable]) throws -> Data {
@@ -121,16 +134,79 @@ struct ProxyExchange: Sendable {
     let session: URLSession
     let timeout: Duration
 
-    /// Performs the exchange within `timeout`, or throws ``CommandError/timeout``.
+    /// Performs the exchange within `timeout`, or throws ``CommandError/timeout`` at the deadline.
+    ///
+    /// The exchange runs in an unstructured task raced against a timer, and whichever settles first
+    /// resumes the caller; the loser is cancelled but not awaited. (A task group would wait for every
+    /// child, so a stalled token fetch, which waiters cannot cancel, would hold `send` past the deadline.)
     func run() async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { try await exchange() }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw CommandError.timeout
+        let race = Race()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                race.install(continuation)
+                let work = Task {
+                    do {
+                        try await exchange()
+                        race.finish(.success(()))
+                    } catch {
+                        race.finish(.failure(error))
+                    }
+                }
+                let timer = Task {
+                    try? await Task.sleep(for: timeout)
+                    race.finish(.failure(CommandError.timeout))
+                }
+                race.onFinish {
+                    work.cancel()
+                    timer.cancel()
+                }
             }
-            defer { group.cancelAll() }
-            try await group.next()
+        } onCancel: {
+            race.finish(.failure(CancellationError()))
+        }
+    }
+
+    /// Resumes the caller exactly once, with whichever of the exchange, the timer or cancellation
+    /// settles first, then runs the clean-up (cancelling the other tasks).
+    private final class Race: Sendable {
+        private struct Box {
+            var continuation: CheckedContinuation<Void, any Error>?
+            var result: Result<Void, any Error>?
+            var cleanup: (@Sendable () -> Void)?
+        }
+
+        private let box = Mutex(Box())
+
+        func install(_ continuation: CheckedContinuation<Void, any Error>) {
+            let early = box.withLock { box -> Result<Void, any Error>? in
+                if let result = box.result { return result }
+                box.continuation = continuation
+                return nil
+            }
+            if let early { continuation.resume(with: early) }
+        }
+
+        func onFinish(_ cleanup: @escaping @Sendable () -> Void) {
+            let settled = box.withLock { box -> Bool in
+                if box.result != nil { return true }
+                box.cleanup = cleanup
+                return false
+            }
+            if settled { cleanup() }
+        }
+
+        func finish(_ result: Result<Void, any Error>) {
+            let (continuation, cleanup) = box.withLock { box -> (CheckedContinuation<Void, any Error>?, (@Sendable () -> Void)?) in
+                guard box.result == nil else { return (nil, nil) }
+                box.result = result
+                defer {
+                    box.continuation = nil
+                    box.cleanup = nil
+                }
+                return (box.continuation, box.cleanup)
+            }
+            cleanup?()
+            continuation?.resume(with: result)
         }
     }
 
@@ -149,7 +225,12 @@ struct ProxyExchange: Sendable {
         } catch let error as APIError {
             switch error {
             case .budgetMinimal: throw CommandError.budgetBlocked
-            case .unauthorized, .notConnected, .tokenUnavailable: throw CommandError.unauthorized
+            // The backend refused the Supabase session itself: signing in again fixes it, Tesla is fine.
+            case .unauthorized: throw CommandError.sessionExpired
+            // No Tesla account linked: the user has to reconnect Tesla.
+            case .notConnected: throw CommandError.unauthorized
+            // Rotation is failing or in progress; it recovers on its own. Never a sign-out.
+            case let .tokenUnavailable(retryAt): throw CommandError.tokenUnavailable(retryAt: retryAt)
             case .rateLimited: throw CommandError.rejected(reason: "too many requests in a short time")
             case .asleep, .server: throw CommandError.rejected(reason: "the Garage server couldn't provide a Tesla token")
             }
@@ -192,7 +273,13 @@ struct ProxyExchange: Sendable {
             throw CommandError.rejected(reason: unexpectedResponse)
         }
         let response = json["response"] as? [String: Any]
+        let message = [json["error"], json["error_description"], response?["reason"]]
+            .compactMap { $0 as? String }
+            .filter { !$0.isEmpty }
+            .joined(separator: ": ")
         if (200..<300).contains(status) {
+            // A 2xx that carries an error envelope instead of a response is still a failure.
+            if response == nil, json["error"] is String, !message.isEmpty { throw classify(reason: message) }
             switch kind {
             case .wake:
                 guard response != nil else { throw CommandError.rejected(reason: unexpectedResponse) }
@@ -206,10 +293,6 @@ struct ProxyExchange: Sendable {
         if status == 429 {
             throw CommandError.rejected(reason: "Tesla is limiting requests right now")
         }
-        let message = [json["error"], json["error_description"], response?["reason"]]
-            .compactMap { $0 as? String }
-            .filter { !$0.isEmpty }
-            .joined(separator: ": ")
         throw classify(reason: message.isEmpty ? unexpectedResponse : message)
     }
 

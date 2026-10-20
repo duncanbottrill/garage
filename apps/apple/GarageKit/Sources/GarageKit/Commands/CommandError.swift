@@ -5,7 +5,7 @@ import Foundation
 public enum CommandError: Error, Sendable, Equatable, LocalizedError {
     /// The bridge's proxy could not be reached (Tailscale off, bridge down, or no proxy URL yet).
     case unreachable
-    /// Tesla refused the token even after one refresh, or the backend has no usable token.
+    /// Tesla refused the token even after one refresh, or no Tesla account is connected: reconnect Tesla.
     case unauthorized
     /// The car is asleep or offline. The caller may offer a wake (never automatic).
     case asleep
@@ -17,6 +17,11 @@ public enum CommandError: Error, Sendable, Equatable, LocalizedError {
     case timeout
     /// The Tesla budget is spent or in minimal mode, so the request was refused.
     case budgetBlocked
+    /// The backend has no usable Tesla token while it renews access; retry after `retryAt` when known.
+    /// Never a reason to sign out (spec §10).
+    case tokenUnavailable(retryAt: Date?)
+    /// The backend refused the Garage (Supabase) session itself, so the user must sign in again.
+    case sessionExpired
 
     public var errorDescription: String? {
         switch self {
@@ -34,6 +39,25 @@ public enum CommandError: Error, Sendable, Equatable, LocalizedError {
             "The car didn't answer in time. Check its state before trying again."
         case .budgetBlocked:
             "This month's Tesla budget is spent, so commands are paused. Check Budget in More."
+        case let .tokenUnavailable(retryAt):
+            if let retryAt {
+                "Garage is renewing its Tesla access. Try again in a few minutes, after \(Self.clockTime(retryAt))."
+            } else {
+                "Garage is renewing its Tesla access. Try again in a few minutes."
+            }
+        case .sessionExpired:
+            "Your Garage sign-in has expired. Sign in again in More."
         }
+    }
+
+    /// `HH:mm` in the device's time zone.
+    static func clockTime(_ date: Date, timeZone: TimeZone = .current) -> String {
+        var style = Date.VerbatimFormatStyle(
+            format: "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)",
+            timeZone: timeZone,
+            calendar: Calendar(identifier: .gregorian)
+        )
+        style.locale = Locale(identifier: "en_US_POSIX")
+        return date.formatted(style)
     }
 }

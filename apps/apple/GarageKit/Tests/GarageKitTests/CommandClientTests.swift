@@ -95,10 +95,10 @@ private struct Rig {
         let first = Task { try await rig.client.send(.doorLock, vin: Rig.vin) }
         while !rig.client.pending.contains("door_lock") { await Task.yield() }
         // The second tap returns at once, without throwing, while the first is in flight.
-        try await rig.client.send(.doorLock, vin: Rig.vin)
+        #expect(try await rig.client.send(.doorLock, vin: Rig.vin) == false)
         #expect(rig.client.pending == ["door_lock"])
         open.yield()
-        try await first.value
+        #expect(try await first.value == true)
 
         #expect(rig.proxy.requests("POST", rig.commandPath("door_lock")).count == 1)
         #expect(rig.client.pending.isEmpty)
@@ -151,6 +151,74 @@ private struct Rig {
         #expect(ContinuousClock.now - started < .seconds(3))
         #expect(rig.client.pending.isEmpty)
         #expect(await rig.usageBodies().isEmpty)
+    }
+
+    @Test func timesOutWhenTokenFetchHangs() async {
+        let rig = Rig(timeout: .milliseconds(200))
+        rig.backend.on("GET", "/api/token") { _ in .hang }
+        rig.onCommand("door_lock", Rig.ok)
+
+        let started = ContinuousClock.now
+        await #expect(throws: CommandError.timeout) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+
+        #expect(ContinuousClock.now - started < .seconds(1))
+        #expect(rig.client.pending.isEmpty)
+        #expect(rig.proxy.requests.isEmpty)
+    }
+
+    @Test func tokenUnavailableIsNotASignOut() async {
+        let rig = Rig()
+        rig.backend.on("GET", "/api/token") { _ in
+            .json(503, #"{"error":"token_unavailable","retry_at":"2026-10-20T08:15:00Z"}"#)
+        }
+
+        let retryAt = Date(timeIntervalSince1970: 1_792_484_100)
+        await #expect(throws: CommandError.tokenUnavailable(retryAt: retryAt)) {
+            try await rig.client.send(.doorLock, vin: Rig.vin)
+        }
+        #expect(rig.proxy.requests.isEmpty)
+        #expect(CommandError.tokenUnavailable(retryAt: nil).errorDescription == "Garage is renewing its Tesla access. Try again in a few minutes.")
+        #expect(CommandError.clockTime(retryAt, timeZone: TimeZone(identifier: "Europe/London")!) == "09:15")
+        let copy = CommandError.tokenUnavailable(retryAt: retryAt).errorDescription ?? ""
+        #expect(copy.hasPrefix("Garage is renewing its Tesla access. Try again in a few minutes, after "))
+        #expect(copy.hasSuffix("\(CommandError.clockTime(retryAt))."))
+    }
+
+    @Test func backendSessionRefusedIsSessionExpired() async {
+        let rig = Rig()
+        rig.backend.on("GET", "/api/token") { _ in .json(401, #"{"error":"unauthorized"}"#) }
+
+        await #expect(throws: CommandError.sessionExpired) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        #expect(CommandError.sessionExpired.errorDescription == "Your Garage sign-in has expired. Sign in again in More.")
+
+        // No Tesla account is a Tesla problem, not a session one.
+        rig.backend.on("GET", "/api/token") { _ in .json(404, #"{"error":"not_connected"}"#) }
+        await #expect(throws: CommandError.unauthorized) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        #expect(rig.proxy.requests.isEmpty)
+    }
+
+    @Test func mapsErrorEnvelopeOn2xx() async {
+        let rig = Rig()
+        rig.onCommand("door_lock", .json(200, #"{"response":null,"error":"vehicle rejected request: your public key has not been paired with the vehicle"}"#))
+        rig.onCommand("door_unlock", .json(200, #"{"error":"vehicle unavailable: vehicle is offline or asleep"}"#))
+
+        await #expect(throws: CommandError.keyMissing) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        await #expect(throws: CommandError.asleep) { try await rig.client.send(.doorUnlock, vin: Rig.vin) }
+    }
+
+    @Test func usageDoesNotRetryClientErrors() async throws {
+        let rig = Rig(usageAttempts: 3)
+        rig.backend.on("POST", "/api/usage") { _ in .json(400, #"{"error":"bad_count"}"#) }
+        rig.onCommand("door_lock", Rig.ok)
+
+        try await rig.client.send(.doorLock, vin: Rig.vin)
+
+        await rig.usage.drain()
+        #expect(rig.backend.requests("POST", "/api/usage").count == 1)
+        #expect(UsageReporter.isRetryable(APIError.rateLimited))
+        #expect(UsageReporter.isRetryable(APIError.server(status: 503)))
+        #expect(UsageReporter.isRetryable(URLError(.networkConnectionLost)))
+        #expect(!UsageReporter.isRetryable(APIError.server(status: 404)))
     }
 
     @Test func defaultTimeoutIsTenSeconds() {
@@ -231,7 +299,10 @@ private struct Rig {
     }
 
     @Test func errorsHavePlainCopy() {
-        let all: [CommandError] = [.unreachable, .unauthorized, .asleep, .keyMissing, .rejected(reason: "is_charging"), .timeout, .budgetBlocked]
+        let all: [CommandError] = [
+            .unreachable, .unauthorized, .asleep, .keyMissing, .rejected(reason: "is_charging"), .timeout, .budgetBlocked,
+            .tokenUnavailable(retryAt: nil), .tokenUnavailable(retryAt: Date()), .sessionExpired,
+        ]
         for error in all {
             let copy = error.errorDescription ?? ""
             #expect(!copy.isEmpty)
@@ -240,13 +311,14 @@ private struct Rig {
     }
 
     @Test func reachabilityUnreachableWhenHostRefuses() async {
-        let reachability = ProxyReachability(target: { nil })
+        // A refusal settles the probe straight away, well before the (shortened) timeout.
+        let reachability = ProxyReachability(target: { nil }, timeout: .milliseconds(500))
 
         let started = ContinuousClock.now
         let state = await reachability.probe(host: "127.0.0.1", port: 1)
 
         #expect(state == .unreachable)
-        #expect(ContinuousClock.now - started < .seconds(3.5))
+        #expect(ContinuousClock.now - started < .milliseconds(250))
     }
 
     @Test func reachabilityTimesOut() async throws {
