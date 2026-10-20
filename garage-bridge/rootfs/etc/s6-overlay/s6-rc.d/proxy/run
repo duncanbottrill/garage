@@ -6,16 +6,25 @@
 # log a clear message and idle rather than crash-looping — the rest of
 # the stack (telemetry, ingest) still comes up without it.
 #
-# The proxy's own HTTPS listener needs its own TLS pair — NOT the Let's
-# Encrypt pair at /data/tls, which belongs to fleet-telemetry and the
-# tailnet FQDN. We generate a self-signed pair into /data/proxy-tls once
-# and reuse it across restarts; the ingest's TelemetryConfigManager
-# already connects to 127.0.0.1:4443 with insecureTls: true, so a
-# self-signed loopback cert is fine.
+# The proxy's HTTPS listener uses the pair in /data/proxy-tls. The
+# listener is served to the tailnet on 4443 as a raw TCP forward, so the
+# iPhone/Mac app sees this certificate and needs one it trusts:
+# - tailscale_enabled: tlscert writes the Let's Encrypt pair for the
+#   node's tailnet FQDN there (`tailscale cert`) and restarts this service
+#   when it changes. On a first start this script waits up to 120 s for
+#   it; if it is still missing, a self-signed pair is generated so the
+#   proxy (and the ingest's telemetry registration) can start, and
+#   tlscert replaces it and restarts the proxy once `tailscale cert`
+#   succeeds. A pair already there (including the self-signed one from
+#   0.2.0) is used as is until tlscert replaces it.
+# - tailscale disabled (dev/e2e): a self-signed pair is generated once
+#   and reused across restarts, as in 0.2.0.
+# The ingest's TelemetryConfigManager connects to 127.0.0.1:4443 with
+# insecureTls: true, so either certificate works for it.
 #
 # Idempotent: re-writing private-key.pem with the same option value is a
-# no-op in effect, and the proxy-tls pair is only (re)generated when
-# missing.
+# no-op in effect, and the self-signed pair is only generated when no
+# pair exists.
 set -euo pipefail
 
 PRIVATE_KEY="$(bashio::config 'tesla_private_key')"
@@ -40,13 +49,47 @@ fi
 mv /data/private-key.pem.tmp /data/private-key.pem
 chmod 600 /data/private-key.pem
 
-mkdir -p /data/proxy-tls
-if [ ! -s /data/proxy-tls/cert.pem ] || [ ! -s /data/proxy-tls/key.pem ]; then
-  bashio::log.info "proxy: generating self-signed TLS pair for the proxy listener"
+PROXY_TLS_DIR=/data/proxy-tls
+mkdir -p "${PROXY_TLS_DIR}"
+
+have_pair() {
+  [ -s "${PROXY_TLS_DIR}/cert.pem" ] && [ -s "${PROXY_TLS_DIR}/key.pem" ]
+}
+
+# Writes a self-signed pair via temp files, and only installs it if no
+# pair appeared in the meantime (tlscert may have just written one).
+generate_self_signed() {
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
     -subj "/CN=garage-bridge" \
-    -keyout /data/proxy-tls/key.pem -out /data/proxy-tls/cert.pem
-  chmod 600 /data/proxy-tls/key.pem
+    -keyout "${PROXY_TLS_DIR}/key.pem.self" -out "${PROXY_TLS_DIR}/cert.pem.self"
+  chmod 600 "${PROXY_TLS_DIR}/key.pem.self"
+  if have_pair; then
+    rm -f "${PROXY_TLS_DIR}/key.pem.self" "${PROXY_TLS_DIR}/cert.pem.self"
+    return 0
+  fi
+  mv "${PROXY_TLS_DIR}/key.pem.self" "${PROXY_TLS_DIR}/key.pem"
+  mv "${PROXY_TLS_DIR}/cert.pem.self" "${PROXY_TLS_DIR}/cert.pem"
+}
+
+if bashio::config.true 'tailscale_enabled'; then
+  waited=0
+  while ! have_pair && [ "${waited}" -lt 120 ]; do
+    if [ "$((waited % 30))" -eq 0 ]; then
+      bashio::log.info "proxy: waiting for the tailnet certificate in ${PROXY_TLS_DIR} (tlscert runs tailscale cert)"
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if have_pair; then
+    ISSUER="$(openssl x509 -noout -issuer -in "${PROXY_TLS_DIR}/cert.pem" 2>/dev/null || echo 'issuer=unreadable')"
+    bashio::log.info "proxy: using the TLS pair in ${PROXY_TLS_DIR} (${ISSUER})"
+  else
+    bashio::log.warning "proxy: no tailnet certificate after 120 s; generating a self-signed pair for now (tlscert replaces it and restarts the proxy once tailscale cert succeeds)"
+    generate_self_signed
+  fi
+elif ! have_pair; then
+  bashio::log.info "proxy: tailscale disabled; generating a self-signed TLS pair for the proxy listener"
+  generate_self_signed
 fi
 
 bashio::log.info "proxy: starting tesla-http-proxy on 127.0.0.1:4443"

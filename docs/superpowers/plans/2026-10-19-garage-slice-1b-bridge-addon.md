@@ -415,7 +415,7 @@ Run: `cd addon/garage-bridge/ingest && npm install && npm test` → FAIL (module
 Tasks 1–7 complete on branch `slice-1b-bridge`. The final whole-branch review found 22 issues; items 1–8, 13 and 16 (10 findings) were fixed before tagging `bridge-v0.1.0`. The rest are tracked here, not only in scratch files:
 
 - Real `fleet-telemetry` → MQTT payload shapes were never captured — now addressed by Task 8's runbook step (capture via `mosquitto_sub` during the first live streaming window, saved under `dev/replay/fixtures/`).
-- The `proxy` service's TLS listener uses a self-signed certificate on the tailnet; a trusted cert is deferred to Plan 1C (recorded in spec §5.8).
+- The `proxy` service's TLS listener used a self-signed certificate on the tailnet in this plan (0.2.0). Since add-on 0.3.0 (Plan 1C) it presents the Let's Encrypt certificate for the tailnet FQDN and is self-signed only when Tailscale is disabled (spec §5.1, §5.8).
 - Ingest crash-loops if Supabase is unreachable at boot, rather than retrying gracefully.
 - Usage counting can be lost on a throw, or rows can go uncounted.
 - MQTT timestamps bunch up after a reconnect (the client uses `clean: false`).

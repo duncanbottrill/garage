@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0
+
+Gets the command proxy ready for the Garage iPhone and Mac app, which
+calls it over the tailnet.
+
+- The proxy's listener (tailnet port 4443) now presents the Let's Encrypt
+  certificate for the node's tailnet name, from `tailscale cert`, instead
+  of a self-signed one, so iOS and macOS trust it without pinning.
+  `tlscert` writes it to `/data/proxy-tls/` after the telemetry
+  certificate step and every 24 hours, in both modes, and restarts the
+  proxy when the certificate changes. In hostname mode it re-checks every
+  30 seconds until the tailnet name is known and retries a failed
+  `tailscale cert` after 10 minutes.
+- On a first start with Tailscale enabled the proxy waits up to 120
+  seconds for that certificate, then falls back to a self-signed one
+  until `tlscert` replaces it. An existing pair (the 0.2.0 self-signed
+  one included) is used until then. With `tailscale_enabled` off the
+  proxy generates and keeps a self-signed pair, as before.
+- The ingest publishes the proxy URL, `https://<tailnet name>:4443`, to
+  the new `vehicles.proxy_base_url` column (migration 0017) on the first
+  heartbeat after the tailnet name is known, and again whenever it
+  changes; with `tailscale_enabled` off it writes `null`. A failed write
+  is retried on the next heartbeat.
+
 ## 0.2.0
 
 Fixes Tesla rejecting the telemetry configuration with `hostname domain

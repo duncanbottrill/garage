@@ -21,6 +21,9 @@ describe("token generators", () => {
     expect(s).not.toContain("enum Type {");
     expect(s).toContain("enum Typography {");
   });
+  it("swift TextStyle is Sendable so its statics compile under Swift 6 strict concurrency", () => {
+    expect(generateSwift(tokens)).toContain("public struct TextStyle: Sendable {");
+  });
   it("swift declares every colour key as a static let", () => {
     const s = generateSwift(tokens);
     for (const key of Object.keys(tokens.color)) expect(s).toContain(`public static let ${key} =`);

@@ -1,0 +1,3 @@
+// Copy to Signing.xcconfig (git-ignored) and keep it local.
+DEVELOPMENT_TEAM = UA9XSPSJ4U
+CODE_SIGN_STYLE = Automatic

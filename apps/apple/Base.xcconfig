@@ -1,0 +1,4 @@
+// The Garage target's base configuration (committed). Signing.xcconfig is git-ignored and optional:
+// copy Signing.xcconfig.example to set DEVELOPMENT_TEAM. Without it a fresh clone still builds
+// (unsigned, with CODE_SIGNING_ALLOWED=NO).
+#include? "Signing.xcconfig"

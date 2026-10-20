@@ -20,13 +20,17 @@ Five s6-supervised services:
   certificate for that name from the add-on's own private CA, re-checks it
   daily and restarts the receiver when it is renewed. Without it, gets a
   Let's Encrypt certificate for `<hostname>.<tailnet>.ts.net` with
-  `tailscale cert` instead.
+  `tailscale cert` instead. In both modes, with Tailscale enabled, it also
+  gets the Let's Encrypt certificate for the node's tailnet name for the
+  command proxy, re-checks it daily and restarts the proxy when it changes.
 - **telemetry**: Tesla's `fleet-telemetry` receiver, listening on port 8443
   inside the container and published on the Green's port 443 (the router
   forwards external TCP 443 there), publishing every record to the local
   Mosquitto broker.
 - **proxy**: Tesla's `tesla-http-proxy` on `127.0.0.1:4443`, which signs
-  Fleet API requests with your private key. Only the ingest talks to it.
+  Fleet API requests with your private key. The ingest talks to it
+  locally; the Garage app reaches it over your tailnet at
+  `https://<hostname>.<tailnet>.ts.net:4443`.
 - **ingest**: reads the MQTT records, writes signals and vehicle state to
   Supabase, and registers the telemetry configuration with the car through
   the proxy.
@@ -42,8 +46,9 @@ You need all of these. Most failed first starts come from a missing one.
      Only the Funnel fallback needs this grant; with `telemetry_hostname`
      set, Funnel is not used.
 2. **MagicDNS and HTTPS certificates enabled** for the tailnet (DNS page in
-   the admin console). Without HTTPS certificates `tailscale cert` fails and
-   Funnel cannot start. Again only needed for the Funnel fallback.
+   the admin console). Without HTTPS certificates `tailscale cert` fails:
+   the command proxy keeps a self-signed certificate the Garage app does
+   not trust, and in the Funnel fallback Funnel cannot start.
 3. **A reusable, pre-authorised auth key tagged `tag:garage`** (Settings,
    Keys, Generate auth key: Reusable on, Pre-approved on, Tags `tag:garage`).
    A one-off key is consumed the first time the add-on starts and every
@@ -289,7 +294,13 @@ interleave):
    the `funnel status` and `serve status` output: serve lists TCP 4443 and
    8443, Funnel lists nothing. A Tailscale problem does not hold up the
    receiver or the registration.
-4. `proxy: starting tesla-http-proxy on 127.0.0.1:4443`.
+4. `tlscert: proxy certificate for garage-bridge.<tailnet>.ts.net
+   installed in /data/proxy-tls` (`unchanged` on later checks), then
+   `proxy: using the TLS pair in /data/proxy-tls (issuer=C = US, O = Let's
+   Encrypt, ...)` and `proxy: starting tesla-http-proxy on
+   127.0.0.1:4443`. On a first install the proxy may start with a
+   self-signed pair (`proxy: no tailnet certificate after 120 s`) and be
+   restarted onto the Let's Encrypt one once Tailscale is up.
 5. Ingest JSON lines: `"msg":"ingest starting"`,
    `"msg":"telemetry registration uses telemetry_hostname (private CA)"`,
    then `"msg":"vehicle resolved"`.
@@ -306,6 +317,16 @@ In the Funnel fallback (no `telemetry_hostname`) step 1 is instead
 `tlscert: certificate for garage-bridge.<tailnet>.ts.net refreshed`, after
 `tailscale up`, and the serve status lists TCP 443 forwarded to
 `127.0.0.1:8443` as well.
+
+The Garage app finds the command proxy on its own: once the node's
+tailnet name is known, the ingest writes
+`https://<hostname>.<tailnet>.ts.net:4443` to `vehicles.proxy_base_url`
+(and rewrites it if the name changes, for example to
+`garage-bridge-1`), and the app reads it from there. Nothing needs typing
+into the app; the phone or Mac only has to be on the tailnet. The proxy
+presents the Let's Encrypt certificate for that name, so iOS and macOS
+trust it as is. With `tailscale_enabled` off the column is set to empty
+(`null`) and the proxy keeps its self-signed certificate.
 
 Once the car is awake and streaming, Garage's status data changes and in
 Supabase `vehicles.telemetry_confirmed_at` is recent, `signals` rows are

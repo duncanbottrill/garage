@@ -175,4 +175,17 @@ describe.skipIf(!hasSupabaseEnv)("SupabaseSink", () => {
     expect(after?.telemetry_config_version).toBe(1);
     expect(after?.telemetry_last_error).toBe("boom");
   });
+
+  it("setProxyBaseUrl writes and clears vehicles.proxy_base_url", async () => {
+    const sink = SupabaseSink(admin, { vehicleId, ownerId });
+
+    await sink.setProxyBaseUrl("https://garage-bridge.tail068c8f.ts.net:4443");
+    const { data, error } = await admin.from("vehicles").select("proxy_base_url").eq("id", vehicleId).single();
+    expect(error).toBeNull();
+    expect(data?.proxy_base_url).toBe("https://garage-bridge.tail068c8f.ts.net:4443");
+
+    await sink.setProxyBaseUrl(null);
+    const { data: cleared } = await admin.from("vehicles").select("proxy_base_url").eq("id", vehicleId).single();
+    expect(cleared?.proxy_base_url).toBeNull();
+  });
 });
