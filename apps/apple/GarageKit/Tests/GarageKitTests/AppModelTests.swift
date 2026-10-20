@@ -89,4 +89,26 @@ private final class MemoryAuthStorage: AuthLocalStorage, @unchecked Sendable {
         #expect(model.vehicleStore.state == nil)
         #expect(VehicleSelection.current(in: defaults) == nil)
     }
+
+    /// The More override (https, with a host) wins over the bridge's published proxy URL, for both
+    /// commands and the reachability probe; anything else in the override is ignored.
+    @Test func proxyOverrideTakesPrecedence() throws {
+        let (defaults, cache) = try seed()
+        let model = makeModel(connected: { true }, defaults: defaults, cache: cache) {}
+        let published = URL(string: "https://garage-bridge.tail068c8f.ts.net:4443")!
+        let override = URL(string: "https://garage-bridge.other.ts.net:4443")!
+
+        #expect(AppModel.proxyBaseURL(published: published, defaults: defaults) == published)
+        #expect(model.proxyBaseURL == nil, "no vehicle loaded and no override")
+
+        defaults.set(override.absoluteString, forKey: ProxyOverride.key)
+        #expect(AppModel.proxyBaseURL(published: published, defaults: defaults) == override)
+        #expect(model.proxyBaseURL == override)
+
+        defaults.set("http://garage-bridge.other.ts.net", forKey: ProxyOverride.key)
+        #expect(AppModel.proxyBaseURL(published: published, defaults: defaults) == published)
+        defaults.set("not a url", forKey: ProxyOverride.key)
+        #expect(AppModel.proxyBaseURL(published: published, defaults: defaults) == published)
+        #expect(model.proxyBaseURL == nil)
+    }
 }

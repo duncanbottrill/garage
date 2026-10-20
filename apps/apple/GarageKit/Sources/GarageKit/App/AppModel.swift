@@ -97,6 +97,46 @@ public final class AppModel {
         }
     }
 
+    // MARK: Proxy
+
+    /// The proxy URL commands and the reachability probe use: the More override
+    /// (``ProxyOverride/key``, when it is https with a host) over the bridge's published URL.
+    public var proxyBaseURL: URL? {
+        Self.proxyBaseURL(published: vehicleStore.vehicle?.proxyBaseURL, defaults: defaults)
+    }
+
+    /// The precedence ``proxyBaseURL`` applies: a valid override in `defaults`, else `published`.
+    static func proxyBaseURL(published: URL?, defaults: UserDefaults) -> URL? {
+        ProxyOverride.resolve(published: published, in: defaults)
+    }
+
+    /// Re-probes the proxy now, after the More override was saved or cleared, so Status and the
+    /// sheets stop showing the old URL's reachability.
+    public func proxyOverrideChanged() {
+        Task { await commandClient.reachabilityMonitor.check() }
+    }
+
+    /// The More screen's model on this app's backend, defaults and proxy probe.
+    public func makeMoreModel() -> MoreModel {
+        let api = api
+        let more = MoreModel(
+            api: MoreModel.API(api),
+            probe: { [weak self] url in
+                guard let monitor = self?.commandClient.reachabilityMonitor, let host = url.host(), !host.isEmpty else { return .unknown }
+                return await monitor.probe(host: host, port: UInt16(clamping: url.port ?? 443))
+            },
+            defaults: defaults
+        )
+        more.onProxyOverrideChange = { [weak self] in self?.proxyOverrideChanged() }
+        return more
+    }
+
+    /// "Reconnect Tesla" (More): back to onboarding's Connect step; the app shows onboarding until
+    /// the Tesla sign-in completes and the next evaluation lands on done again.
+    public func reconnectTesla() {
+        flow.reset(to: .connectTesla)
+    }
+
     // MARK: Lifecycle
 
     /// Starts following auth changes and runs the first onboarding evaluation. Call once, at launch.
@@ -291,8 +331,8 @@ public final class AppModel {
     }
 
     private static func makeCommandClient(api: GarageAPI, owner: WeakModel) -> CommandClient {
-        // Task 9 adds the More override (`proxyBaseURLOverride`) in front of the published URL.
-        CommandClient(api: api) { owner.model?.vehicleStore.vehicle?.proxyBaseURL }
+        // Read per send and per probe, so a newly published URL or a changed override is picked up.
+        CommandClient(api: api) { owner.model?.proxyBaseURL }
     }
 
     private static func checks(owner: WeakModel) -> OnboardingFlow.Checks {

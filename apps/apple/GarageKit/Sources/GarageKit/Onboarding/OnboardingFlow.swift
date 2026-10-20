@@ -160,14 +160,16 @@ public final class OnboardingFlow {
         return true
     }
 
-    /// Back to ``Step/signIn`` with nothing remembered (sign-out). An evaluation still in flight is
-    /// abandoned. Signed out is a known state, so ``hasEvaluated`` becomes true: the view shows sign-in
-    /// rather than waiting on an evaluation that will never publish.
-    public func reset() {
+    /// Back to `step` with nothing remembered: ``Step/signIn`` on sign-out (the default), or
+    /// ``Step/connectTesla`` for "Reconnect Tesla" in More. An evaluation still in flight is abandoned.
+    /// The step is a known state, so ``hasEvaluated`` becomes true: the view shows it rather than
+    /// waiting on an evaluation that will never publish. The completion record is left alone (sign-out
+    /// clears it separately), so finishing the Tesla sign-in goes straight back to ``Step/done``.
+    public func reset(to step: Step = .signIn) {
         generation &+= 1
         isEvaluating = false
         hasEvaluated = true
-        step = .signIn
+        self.step = step
         proxyState = .unknown
         lastError = nil
     }

@@ -310,6 +310,34 @@ private func freshDefaults() -> UserDefaults {
         #expect(!flow.isEvaluating)
     }
 
+    /// "Reconnect Tesla" in More: from the app proper straight to the Connect step, abandoning any
+    /// evaluation in flight and keeping this device's completion record.
+    @Test func resetToConnectTeslaShowsConnectStep() async {
+        let world = FakeWorld()
+        world.allGood()
+        let defaults = freshDefaults()
+        OnboardingFlow.markCompleted(by: world.userID, in: defaults)
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        world.sessionGate = {
+            for await _ in gate { break }
+        }
+        let flow = OnboardingFlow(step: .done, checks: world.checks, defaults: defaults)
+        flow.lastError = "old"
+
+        let evaluation = Task { await flow.evaluate() }
+        while world.sessionCalls == 0 { await Task.yield() }
+        flow.reset(to: .connectTesla)
+        open.yield()
+        open.finish()
+        await evaluation.value
+
+        #expect(flow.step == .connectTesla)
+        #expect(flow.lastError == nil)
+        #expect(flow.hasEvaluated)
+        #expect(!flow.isEvaluating)
+        #expect(OnboardingFlow.hasCompleted(by: world.userID, in: defaults))
+    }
+
     @Test func connectedCallbackRecognised() throws {
         #expect(OnboardingFlow.isConnectedCallback(try #require(URL(string: "garage://connected"))))
         #expect(OnboardingFlow.isConnectedCallback(try #require(URL(string: "GARAGE://connected?ok=1"))))

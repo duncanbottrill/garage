@@ -10,7 +10,8 @@ LICENSES="$RES/LICENSES"
 LUCIDE_VERSION=1.60.0
 BASE=https://unpkg.com/lucide-static@$LUCIDE_VERSION
 ICONS=(lock lock-open thermometer snowflake flame battery-charging plug plug-zap car-front navigation map-pin fan wind
-       zap clock refresh-cw settings chevron-right circle-alert wifi-off check x sun moon gauge route minus plus)
+       zap clock refresh-cw settings chevron-right circle-alert wifi-off check x sun moon gauge route minus plus
+       key server link network user info)
 mkdir -p "$CATALOG" "$LICENSES"
 
 echo "lucide-static $LUCIDE_VERSION"
