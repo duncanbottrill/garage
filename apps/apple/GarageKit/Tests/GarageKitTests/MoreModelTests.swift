@@ -146,15 +146,68 @@ private final class FakeBackend {
         #expect(model.effectiveProxyURL == URL(string: override))
         #expect(changes == 1)
 
-        await model.testProxy()
+        // Nothing typed: "Test" probes the URL in use.
+        #expect(await model.testProxy(candidate: ""))
         #expect(backend.probed == [URL(string: override)!])
-        #expect(model.proxyTest == .finished(.reachable))
+        #expect(model.proxyTest == .finished(.reachable, url: URL(string: override)!))
+        #expect(model.row(.proxy)?.tone == .healthy)
 
         model.clearProxyOverride()
         #expect(defaults.string(forKey: ProxyOverride.key) == nil)
         #expect(model.effectiveProxyURL == published)
         #expect(!model.isUsingOverride)
         #expect(changes == 2)
+    }
+}
+
+extension MoreModelTests {
+    /// "Test" probes what is typed, without saving it; a malformed candidate probes nothing.
+    @Test func testProbesTypedCandidate() async {
+        let backend = FakeBackend()
+        backend.probeResult = .unreachable
+        let defaults = freshDefaults()
+        let model = makeModel(backend, defaults: defaults)
+        let saved = "https://garage-bridge.saved.ts.net:4443"
+        #expect(model.saveProxyOverride(saved))
+        let candidate = "https://garage-bridge.candidate.ts.net:4443"
+
+        #expect(await model.testProxy(candidate: " \(candidate) "))
+        #expect(backend.probed == [URL(string: candidate)!])
+        #expect(model.proxyTest == .finished(.unreachable, url: URL(string: candidate)!))
+        #expect(defaults.string(forKey: ProxyOverride.key) == saved)
+        #expect(model.effectiveProxyURL == URL(string: saved))
+        // The dot is for the URL in use, not the candidate.
+        #expect(model.row(.proxy)?.tone == .neutral)
+
+        #expect(!(await model.testProxy(candidate: "http://garage-bridge.candidate.ts.net")))
+        #expect(backend.probed.count == 1)
+    }
+
+    /// An override is a bare https origin: user info, a query, a fragment or a path are refused,
+    /// and the accepted URL is rebuilt from scheme, host and port.
+    @Test func overrideValidationAcceptsOnlyAnOrigin() {
+        #expect(ProxyOverride.validated("https://garage-bridge.x.ts.net:4443")?.absoluteString == "https://garage-bridge.x.ts.net:4443")
+        #expect(ProxyOverride.validated("https://garage-bridge.x.ts.net/")?.absoluteString == "https://garage-bridge.x.ts.net")
+        #expect(ProxyOverride.validated("HTTPS://garage-bridge.x.ts.net")?.absoluteString == "https://garage-bridge.x.ts.net")
+        #expect(ProxyOverride.validated("https://user:pw@garage-bridge.x.ts.net") == nil)
+        #expect(ProxyOverride.validated("https://user@garage-bridge.x.ts.net") == nil)
+        #expect(ProxyOverride.validated("https://garage-bridge.x.ts.net?next=evil") == nil)
+        #expect(ProxyOverride.validated("https://garage-bridge.x.ts.net#frag") == nil)
+        #expect(ProxyOverride.validated("https://garage-bridge.x.ts.net/api/1") == nil)
+        #expect(ProxyOverride.validated("http://garage-bridge.x.ts.net") == nil)
+        #expect(ProxyOverride.validated("garage-bridge.x.ts.net") == nil)
+    }
+}
+
+extension MoreModelTests {
+    /// About opens the full notice for everything that ships; supabase-swift's MIT text is bundled.
+    @Test func shippedLicenceTextsAreBundled() throws {
+        for licence in MoreModel.licences where licence.file != nil {
+            let text = try #require(licence.text, "\(licence.name) notice missing")
+            #expect(!text.isEmpty)
+        }
+        let supabase = try #require(MoreModel.licences.first { $0.name == "supabase-swift" })
+        #expect(supabase.text?.contains("Copyright (c) 2021 Supabase") == true)
     }
 }
 

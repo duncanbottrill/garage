@@ -42,6 +42,8 @@ public final class AppModel {
     @ObservationIgnored private var pendingNonce: AppleNonce?
     @ObservationIgnored private var authTask: Task<Void, Never>?
     @ObservationIgnored private var reachabilityRunning = false
+    /// Backs ``moreModel``.
+    @ObservationIgnored private var more: MoreModel?
     /// Ends the Supabase session on this device (`signOut(scope: .local)`); injectable for tests.
     @ObservationIgnored private let endSession: @MainActor () async -> Void
 
@@ -116,8 +118,17 @@ public final class AppModel {
         Task { await commandClient.reachabilityMonitor.check() }
     }
 
+    /// The More screen's model, made on first use and kept (with its connection health, refresh and
+    /// probe results) across tab switches; dropped on sign-out with the rest of the account's state.
+    public var moreModel: MoreModel {
+        if let more { return more }
+        let made = makeMoreModel()
+        more = made
+        return made
+    }
+
     /// The More screen's model on this app's backend, defaults and proxy probe.
-    public func makeMoreModel() -> MoreModel {
+    private func makeMoreModel() -> MoreModel {
         let api = api
         let more = MoreModel(
             api: MoreModel.API(api),
@@ -311,7 +322,10 @@ public final class AppModel {
         reachabilityRunning = false
         cache.clear()
         VehicleSelection.set(nil, in: defaults)
+        // The override points at this account's bridge; the next account starts on its published URL.
+        ProxyOverride.set(nil, in: defaults)
         OnboardingFlow.resetCompletion(in: defaults)
+        more = nil
         // Fresh instances: the store's in-memory state and the client's cached Tesla token go too.
         let owner = WeakModel()
         owner.model = self

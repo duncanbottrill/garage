@@ -40,7 +40,11 @@ public struct OnboardingView: View {
                 onEmailSignIn: { email, password in Task { await model.signIn(email: email, password: password) } }
             )
         case .connectTesla:
-            ConnectTeslaStep(isWorking: model.isWorking, errorMessage: flow.lastError) {
+            ConnectTeslaStep(
+                isWorking: model.isWorking,
+                errorMessage: flow.lastError,
+                onNotNow: flow.reconnectRequested ? { flow.cancelReconnect() } : nil
+            ) {
                 Task { await model.connectTesla() }
             }
         case .chooseVehicle:

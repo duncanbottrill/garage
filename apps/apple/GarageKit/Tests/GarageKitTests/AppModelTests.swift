@@ -60,8 +60,11 @@ private final class MemoryAuthStorage: AuthLocalStorage, @unchecked Sendable {
     @Test func unauthorizedResetsStateAndCache() async throws {
         let (defaults, cache) = try seed()
         var ended = 0
+        defaults.set("https://garage-bridge.other.ts.net:4443", forKey: ProxyOverride.key)
         let model = makeModel(connected: { throw APIError.unauthorized }, defaults: defaults, cache: cache) { ended += 1 }
         #expect(model.vehicleStore.state != nil)
+        let more = model.moreModel
+        #expect(model.moreModel === more, "one More model, kept")
 
         await model.refresh()
 
@@ -74,6 +77,8 @@ private final class MemoryAuthStorage: AuthLocalStorage, @unchecked Sendable {
         #expect(model.vehicleStore.vehicle == nil)
         #expect(VehicleSelection.current(in: defaults) == nil)
         #expect(!OnboardingFlow.hasCompleted(by: userID, in: defaults))
+        #expect(defaults.string(forKey: ProxyOverride.key) == nil, "the override belongs to the old account's bridge")
+        #expect(model.moreModel !== more, "the More model goes with the account")
     }
 
     @Test func missingSessionResetsStateWithoutServerSignOut() async throws {

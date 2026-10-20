@@ -332,10 +332,57 @@ private func freshDefaults() -> UserDefaults {
         await evaluation.value
 
         #expect(flow.step == .connectTesla)
+        #expect(flow.reconnectRequested)
         #expect(flow.lastError == nil)
         #expect(flow.hasEvaluated)
         #expect(!flow.isEvaluating)
         #expect(OnboardingFlow.hasCompleted(by: world.userID, in: defaults))
+    }
+
+    /// `/api/connection` still says connected after a failed rotation, so a requested reconnect must
+    /// hold Connect through evaluations until the Tesla sign-in comes back cleanly.
+    @Test func reconnectHoldsConnectUntilCallback() async throws {
+        let world = FakeWorld()
+        world.allGood()
+        let defaults = freshDefaults()
+        OnboardingFlow.markCompleted(by: world.userID, in: defaults)
+        let flow = OnboardingFlow(step: .done, checks: world.checks, defaults: defaults)
+
+        flow.reset(to: .connectTesla)
+        await flow.evaluate()
+        #expect(flow.step == .connectTesla, "evaluate (scene active) must not bounce back to done")
+        #expect(flow.reconnectRequested)
+
+        // A sign-in that came back with an error keeps the owner on Connect.
+        await flow.handle(url: try #require(URL(string: "garage://connected?error=access_denied")))
+        #expect(flow.step == .connectTesla)
+        #expect(flow.reconnectRequested)
+
+        await flow.handle(url: try #require(URL(string: "garage://connected")))
+        #expect(!flow.reconnectRequested)
+        #expect(flow.step == .done)
+    }
+
+    /// "Not now" on a requested reconnect returns to the app without connecting.
+    @Test func notNowReturnsToDone() async {
+        let world = FakeWorld()
+        world.allGood()
+        let defaults = freshDefaults()
+        OnboardingFlow.markCompleted(by: world.userID, in: defaults)
+        let flow = OnboardingFlow(step: .done, checks: world.checks, defaults: defaults)
+
+        flow.reset(to: .connectTesla)
+        flow.cancelReconnect()
+        #expect(flow.step == .done)
+        #expect(!flow.reconnectRequested)
+        await flow.evaluate()
+        #expect(flow.step == .done)
+
+        // Signing out drops a pending request too.
+        flow.reset(to: .connectTesla)
+        flow.reset()
+        #expect(!flow.reconnectRequested)
+        #expect(flow.step == .signIn)
     }
 
     @Test func connectedCallbackRecognised() throws {

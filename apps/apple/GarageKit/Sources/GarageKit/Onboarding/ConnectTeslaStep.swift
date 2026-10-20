@@ -6,14 +6,17 @@ public struct ConnectTeslaStep: View {
     private let isWorking: Bool
     private let errorMessage: String?
     private let onConnect: () -> Void
+    private let onNotNow: (() -> Void)?
 
     /// - Parameters:
     ///   - isWorking: The Tesla sign-in is open or being started.
     ///   - errorMessage: The last failure's copy.
+    ///   - onNotNow: When set (a reconnect from More), a "Not now" button that goes back to the app.
     ///   - onConnect: Starts the Tesla sign-in (``AppModel/connectTesla()``).
-    public init(isWorking: Bool, errorMessage: String?, onConnect: @escaping () -> Void) {
+    public init(isWorking: Bool, errorMessage: String?, onNotNow: (() -> Void)? = nil, onConnect: @escaping () -> Void) {
         self.isWorking = isWorking
         self.errorMessage = errorMessage
+        self.onNotNow = onNotNow
         self.onConnect = onConnect
     }
 
@@ -27,6 +30,11 @@ public struct ConnectTeslaStep: View {
             VStack(spacing: Tokens.Space.l) {
                 Button("Connect Tesla", action: onConnect)
                     .onboarding(.primary, isWorking: isWorking)
+                if let onNotNow {
+                    Button("Not now", action: onNotNow)
+                        .onboarding(.secondary)
+                        .disabled(isWorking)
+                }
                 OnboardingNotice(
                     icon: .lock,
                     text: "Garage never sees your Tesla password. Tesla asks which permissions to grant.",

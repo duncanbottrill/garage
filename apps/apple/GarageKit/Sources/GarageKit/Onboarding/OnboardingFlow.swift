@@ -78,6 +78,11 @@ public final class OnboardingFlow {
     public private(set) var proxyState: ProxyReachability.State = .unknown
     /// Plain-language copy for the last failure, for the current step's view; nil when the last check passed.
     public var lastError: String?
+    /// True after "Reconnect Tesla" (``reset(to:)`` with ``Step/connectTesla``) until the Tesla sign-in
+    /// comes back without an error, the owner taps "Not now" (``cancelReconnect()``) or signs out.
+    /// While it is set, a signed-in evaluation stays on ``Step/connectTesla``: `/api/connection` still
+    /// reports `connected` after a failed rotation, so it cannot tell that a reconnect is wanted.
+    public private(set) var reconnectRequested = false
     /// Called after an evaluation lands on ``Step/signIn``; `sessionRefused` is true when the backend
     /// refused the session (``APIError/unauthorized``), so the app should also end it locally.
     @ObservationIgnored public var onSignedOut: (@MainActor (_ sessionRefused: Bool) async -> Void)?
@@ -140,6 +145,7 @@ public final class OnboardingFlow {
 
     private func landOnSignIn(refused: Bool, notify: Bool) async {
         lastError = nil
+        reconnectRequested = false
         step = .signIn
         Self.resetCompletion(in: defaults)
         if notify { await onSignedOut?(refused) }
@@ -153,6 +159,9 @@ public final class OnboardingFlow {
         guard Self.isConnectedCallback(url) else { return false }
         let failure = URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?.first { $0.name == "error" }?.value
+        // A clean return from the Tesla sign-in completes a requested reconnect; one with an error
+        // keeps the owner on Connect.
+        if failure == nil { reconnectRequested = false }
         await evaluate()
         if let failure, step == .connectTesla {
             lastError = Self.callbackMessage(for: failure)
@@ -165,13 +174,27 @@ public final class OnboardingFlow {
     /// The step is a known state, so ``hasEvaluated`` becomes true: the view shows it rather than
     /// waiting on an evaluation that will never publish. The completion record is left alone (sign-out
     /// clears it separately), so finishing the Tesla sign-in goes straight back to ``Step/done``.
+    ///
+    /// Resetting to ``Step/connectTesla`` sets ``reconnectRequested``; any other step clears it.
     public func reset(to step: Step = .signIn) {
         generation &+= 1
         isEvaluating = false
         hasEvaluated = true
+        reconnectRequested = step == .connectTesla
         self.step = step
         proxyState = .unknown
         lastError = nil
+    }
+
+    /// "Not now" on a requested reconnect: back to ``Step/done`` without connecting. An evaluation still
+    /// in flight is abandoned so it cannot land on Connect again.
+    public func cancelReconnect() {
+        guard reconnectRequested else { return }
+        generation &+= 1
+        isEvaluating = false
+        reconnectRequested = false
+        lastError = nil
+        step = .done
     }
 
     /// Records a failure from a step's own action (sign-in, Tesla, vehicle sync) for the view.
@@ -213,6 +236,7 @@ public final class OnboardingFlow {
 
     private func decide() async throws -> (step: Step, userID: UUID?) {
         guard let userID = try await checks.sessionUserID() else { return (.signIn, nil) }
+        if reconnectRequested { return (.connectTesla, userID) }
         guard try await checks.isTeslaConnected() else { return (.connectTesla, userID) }
         guard try await checks.vehicle() != nil else { return (.chooseVehicle, userID) }
         if Self.hasCompleted(by: userID, in: defaults) { return (.done, userID) }

@@ -108,14 +108,13 @@ public struct RootView: View {
 
     private var sidebar: some View {
         NavigationSplitView {
-            // Rows are drawn here rather than by the list's selection, so the selected one is the
-            // accent tint on glass (as Status's active pills) on every platform, not the system highlight.
-            List(Destination.allCases) { destination in
-                SidebarRow(destination: destination, selected: destination == selection) {
-                    selection = destination
-                }
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
+            // A selection list (arrow keys, VoiceOver "selected"), with the row drawn here: the accent
+            // on an accent-tinted capsule, as Status's active pills, instead of the system highlight.
+            List(Destination.allCases, selection: sidebarSelection) { destination in
+                SidebarRow(destination: destination, selected: destination == selection)
+                    .tag(destination)
+                    .listRowBackground(SidebarRowBackground(selected: destination == selection))
+                    .listRowSeparator(.hidden)
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -125,6 +124,11 @@ public struct RootView: View {
             screen(selection)
         }
         .tint(Tokens.Colors.accent)
+    }
+
+    /// The list wants an optional selection; nil (a click on empty space) keeps the current one.
+    private var sidebarSelection: Binding<Destination?> {
+        Binding(get: { selection }, set: { if let value = $0 { selection = value } })
     }
 
     // MARK: Screens
@@ -152,33 +156,36 @@ public struct RootView: View {
     }
 }
 
-/// One sidebar destination: icon and body-scale title, in the accent on an accent-tinted capsule
-/// while selected.
+/// One sidebar destination: icon and body-scale title, in the accent while selected.
 private struct SidebarRow: View {
     let destination: RootView.Destination
     let selected: Bool
-    let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: Tokens.Space.m) {
-                Icon(destination.icon)
-                Text(destination.title)
-                    .garage(.body)
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(selected ? Tokens.Colors.accent : Tokens.Colors.ink)
-            .padding(.horizontal, Tokens.Space.m)
-            .frame(minHeight: 36)
-            .background {
-                if selected {
-                    Capsule(style: .continuous).fill(Tokens.Colors.accent.opacity(Tokens.Opacity.accentFill))
-                    Capsule(style: .continuous).strokeBorder(Tokens.Colors.accent.opacity(Tokens.Opacity.accentStroke), lineWidth: 1)
-                }
-            }
-            .contentShape(.capsule)
+        Label {
+            Text(destination.title)
+                .garage(.body)
+        } icon: {
+            Icon(destination.icon)
         }
-        .buttonStyle(DimWhenPressed())
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        .foregroundStyle(selected ? Tokens.Colors.accent : Tokens.Colors.ink)
+        .frame(minHeight: 28)
+    }
+}
+
+/// The selected sidebar row's background: an accent-fill capsule with an accent edge; clear otherwise.
+private struct SidebarRowBackground: View {
+    let selected: Bool
+
+    var body: some View {
+        if selected {
+            ZStack {
+                Capsule(style: .continuous).fill(Tokens.Colors.accent.opacity(Tokens.Opacity.accentFill))
+                Capsule(style: .continuous).strokeBorder(Tokens.Colors.accent.opacity(Tokens.Opacity.accentStroke), lineWidth: 1)
+            }
+            .padding(.horizontal, Tokens.Space.s)
+        } else {
+            Color.clear
+        }
     }
 }

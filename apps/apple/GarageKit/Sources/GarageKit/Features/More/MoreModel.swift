@@ -9,13 +9,23 @@ public enum ProxyOverride {
     /// The `UserDefaults` key holding the override's text.
     public static let key = "proxyBaseURLOverride"
 
-    /// `text` as a proxy URL (trimmed), or nil unless it is `https` with a non-empty host.
+    /// `text` as a proxy origin (trimmed), or nil unless it is `https` with a non-empty host and
+    /// nothing else: no user info, query or fragment, and no path beyond "/". The result is rebuilt
+    /// from the scheme, host and port alone, so it is always a bare origin.
     public static func validated(_ text: String) -> URL? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed), url.scheme?.lowercased() == "https",
-              let host = url.host(), !host.isEmpty
+        guard let parts = URLComponents(string: trimmed),
+              parts.scheme?.lowercased() == "https",
+              let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil,
+              parts.query == nil, parts.fragment == nil,
+              parts.path.isEmpty || parts.path == "/"
         else { return nil }
-        return url
+        var origin = URLComponents()
+        origin.scheme = "https"
+        origin.host = host
+        origin.port = parts.port
+        return origin.url
     }
 
     /// The saved override, when it is valid.
@@ -108,7 +118,9 @@ public final class MoreModel {
 
     /// Where the proxy "Test" probe is.
     public enum ProxyTest: Sendable, Equatable {
-        case idle, testing, finished(ProxyReachability.State)
+        case idle, testing
+        /// The probe of `url` (nil when there was nothing to probe) settled on `state`.
+        case finished(ProxyReachability.State, url: URL?)
     }
 
     /// The app's version and build, for About.
@@ -138,15 +150,33 @@ public final class MoreModel {
     public struct Licence: Sendable, Equatable, Identifiable {
         public let name: String
         public let licence: String
+        /// The bundled notice in `Resources/LICENSES` (without `.txt`), or nil when none ships.
+        public let file: String?
         public var id: String { name }
+
+        public init(name: String, licence: String, file: String? = nil) {
+            self.name = name
+            self.licence = licence
+            self.file = file
+        }
+
+        /// The bundled notice text, when there is one.
+        public var text: String? {
+            guard let file else { return nil }
+            let bundle = GarageKit.resources
+            let url = bundle.url(forResource: file, withExtension: "txt", subdirectory: "LICENSES")
+                ?? bundle.url(forResource: file, withExtension: "txt")
+            return url.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        }
     }
 
     /// The fonts, icons and libraries Garage uses, with their licences.
     public static let licences: [Licence] = [
-        Licence(name: "Big Shoulders Display", licence: "SIL OFL 1.1"),
-        Licence(name: "Instrument Sans", licence: "SIL OFL 1.1"),
-        Licence(name: "Lucide icons", licence: "ISC"),
-        Licence(name: "supabase-swift", licence: "MIT"),
+        Licence(name: "Big Shoulders Display", licence: "SIL OFL 1.1", file: "BigShouldersDisplay-OFL"),
+        Licence(name: "Instrument Sans", licence: "SIL OFL 1.1", file: "InstrumentSans-OFL"),
+        Licence(name: "Lucide icons", licence: "ISC", file: "Lucide-LICENSE"),
+        Licence(name: "supabase-swift", licence: "MIT", file: "supabase-swift-LICENSE"),
+        // Used by the test targets only; nothing of it ships in the app.
         Licence(name: "swift-snapshot-testing", licence: "MIT"),
     ]
 
@@ -279,14 +309,30 @@ public final class MoreModel {
         overrideChanged()
     }
 
-    /// Probes ``effectiveProxyURL`` once and shows the result; `.unknown` when there is no URL.
-    public func testProxy() async {
-        guard let url = effectiveProxyURL else {
-            proxyTest = .finished(.unknown)
-            return
+    /// "Test": probes what is typed, or the URL in use when nothing is typed. Nothing is saved.
+    ///
+    /// - Non-empty and valid (``ProxyOverride/validated(_:)``): probes `candidate`.
+    /// - Non-empty and invalid: probes nothing and returns false (the view says why).
+    /// - Empty: probes ``effectiveProxyURL``; `.unknown` when there is none.
+    /// - Returns: false only when `candidate` was rejected.
+    @discardableResult
+    public func testProxy(candidate: String) async -> Bool {
+        let typed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target: URL?
+        if typed.isEmpty {
+            target = effectiveProxyURL
+        } else if let url = ProxyOverride.validated(typed) {
+            target = url
+        } else {
+            return false
+        }
+        guard let target else {
+            proxyTest = .finished(.unknown, url: nil)
+            return true
         }
         proxyTest = .testing
-        proxyTest = .finished(await probe(url))
+        proxyTest = .finished(await probe(target), url: target)
+        return true
     }
 
     private func overrideChanged() {
@@ -375,10 +421,14 @@ public final class MoreModel {
 
     private var proxyRow: Row {
         let detail = effectiveProxyURL?.absoluteString ?? "Not published yet"
-        let tone: Row.Tone = switch proxyTest {
-        case .finished(.reachable): .healthy
-        case .finished(.unreachable): .failed
-        default: .neutral
+        // The dot speaks for the URL in use only, not for a typed candidate that was tested.
+        var tone = Row.Tone.neutral
+        if case let .finished(state, url?) = proxyTest, url == effectiveProxyURL {
+            tone = switch state {
+            case .reachable: .healthy
+            case .unreachable: .failed
+            case .unknown: .neutral
+            }
         }
         return Row(id: .proxy, icon: .link, title: "Proxy URL", detail: detail, tone: tone)
     }

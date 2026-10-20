@@ -20,19 +20,20 @@ public struct MoreView: View {
 
     private let app: AppModel?
     private let actions: Actions
-    @State private var more: MoreModel
+    private let more: MoreModel
     @State private var tailscaleInstalled: Bool
     @State private var draft = ""
     @State private var draftRejected = false
     @State private var linking = false
     @State private var accountMessage: String?
     @State private var confirmingSignOut = false
+    @State private var shownLicence: MoreModel.Licence?
     @Environment(\.openURL) private var openURL
 
     /// - Parameter model: The app model: backend, vehicle store, proxy reachability and account.
     public init(model: AppModel) {
         app = model
-        _more = State(initialValue: model.makeMoreModel())
+        more = model.moreModel
         _tailscaleInstalled = State(initialValue: false)
         actions = Actions(
             reconnectTesla: { [weak model] in model?.reconnectTesla() },
@@ -45,7 +46,7 @@ public struct MoreView: View {
     init(more: MoreModel, actions: Actions = .none, tailscaleInstalled: Bool = true) {
         app = nil
         self.actions = actions
-        _more = State(initialValue: more)
+        self.more = more
         _tailscaleInstalled = State(initialValue: tailscaleInstalled)
     }
 
@@ -66,6 +67,7 @@ public struct MoreView: View {
             Button("Sign out", role: .destructive) { Task { await actions.signOut() } }
             Button("Cancel", role: .cancel) {}
         }
+        .sheet(item: $shownLicence) { LicenceSheet(licence: $0) }
         .modifier(LiveInputs(app: app, more: more))
         .task {
             if app != nil {
@@ -176,7 +178,7 @@ public struct MoreView: View {
                 MoreButton(title: "Save", action: saveDraft)
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 MoreButton(title: "Test", isWorking: more.proxyTest == .testing) {
-                    Task { await more.testProxy() }
+                    Task { draftRejected = !(await more.testProxy(candidate: draft)) }
                 }
                 if more.isUsingOverride {
                     MoreButton(title: "Use published") {
@@ -195,11 +197,12 @@ public struct MoreView: View {
     }
 
     private var proxyTestText: (text: String, color: Color)? {
-        switch more.proxyTest {
-        case .idle, .testing: nil
-        case .finished(.reachable): ("Reachable: the proxy answered the handshake", Tokens.Colors.charging)
-        case .finished(.unreachable): ("Unreachable: check Tailscale and the bridge", Tokens.Colors.danger)
-        case .finished(.unknown): ("No proxy URL to test yet", Tokens.Colors.muted)
+        guard case let .finished(state, url) = more.proxyTest else { return nil }
+        let host = url?.host() ?? "the proxy"
+        return switch state {
+        case .reachable: ("Reachable: \(host) answered the handshake", Tokens.Colors.charging)
+        case .unreachable: ("Unreachable: \(host). Check Tailscale and the bridge", Tokens.Colors.danger)
+        case .unknown: ("No proxy URL to test yet", Tokens.Colors.muted)
         }
     }
 
@@ -245,18 +248,57 @@ public struct MoreView: View {
     private var licences: some View {
         VStack(alignment: .leading, spacing: Tokens.Space.xs) {
             ForEach(MoreModel.licences) { item in
-                HStack(spacing: Tokens.Space.s) {
-                    Text(item.name)
-                        .garage(.caption)
-                        .foregroundStyle(Tokens.Colors.ink)
-                    Spacer(minLength: Tokens.Space.s)
-                    Text(item.licence)
-                        .garage(.caption)
-                        .foregroundStyle(Tokens.Colors.muted)
+                Button { shownLicence = item } label: {
+                    HStack(spacing: Tokens.Space.s) {
+                        Text(item.name)
+                            .garage(.caption)
+                            .foregroundStyle(Tokens.Colors.ink)
+                        Spacer(minLength: Tokens.Space.s)
+                        Text(item.licence)
+                            .garage(.caption)
+                            .foregroundStyle(Tokens.Colors.muted)
+                        Icon(.chevronRight, size: 12)
+                            .foregroundStyle(Tokens.Colors.muted)
+                            .opacity(item.file == nil ? 0 : 1)
+                    }
+                    .frame(minHeight: 28)
+                    .contentShape(.rect)
                 }
+                .buttonStyle(DimWhenPressed())
+                .disabled(item.file == nil)
                 .accessibilityElement(children: .combine)
+                .accessibilityHint(item.file == nil ? "" : "Shows the licence text")
             }
         }
+    }
+}
+
+/// A bundled licence notice, in full, on the app background.
+private struct LicenceSheet: View {
+    let licence: MoreModel.Licence
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Tokens.Space.l) {
+            HStack {
+                SmallCapsLabel("\(licence.name) · \(licence.licence)")
+                Spacer(minLength: Tokens.Space.s)
+                GlassIconButton(icon: .x, accessibilityLabel: "Close") { dismiss() }
+            }
+            ScrollView {
+                Text(verbatim: licence.text ?? "")
+                    .garage(.caption)
+                    .foregroundStyle(Tokens.Colors.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(Tokens.Space.xl)
+        .background(Tokens.Colors.background.ignoresSafeArea())
+        #if os(macOS)
+        .frame(minWidth: 480, idealWidth: 560, minHeight: 480, idealHeight: 600)
+        #endif
     }
 }
 
