@@ -69,6 +69,11 @@ without them; only real sign-in needs them.
 3. **Keep email/password enabled** for the bootstrap account until "Link Apple ID" has been run once on the owner's
    device. After that, Sign in with Apple reaches the same account (and the same car).
 
+> **Order matters.** The owner signs in with **Use email** first (the bootstrap account that owns the car), then
+> runs **More → Link Apple ID**. Tapping Sign in with Apple before linking creates a *second*, empty Supabase user
+> for that Apple ID; linking then fails because the Apple identity already belongs to it. Delete that extra user in
+> the Supabase dashboard (Authentication → Users) before running Link Apple ID.
+
 ### How sign-in works
 
 - Sign in with Apple runs natively (`SignInWithAppleButton`, or `ASAuthorizationController` for linking) with a

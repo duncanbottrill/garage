@@ -6,6 +6,10 @@ import Testing
 @MainActor
 private final class FakeWorld {
     var session = false
+    /// The signed-in user's id while `session` is true.
+    var userID = UUID()
+    /// Awaited inside the session check when set, so a test can act while an evaluation is in flight.
+    var sessionGate: (@MainActor () async -> Void)?
     var connected = false
     var vehicle: Vehicle?
     var reachability: ProxyReachability.State = .unreachable
@@ -19,9 +23,10 @@ private final class FakeWorld {
 
     var checks: OnboardingFlow.Checks {
         OnboardingFlow.Checks(
-            hasSession: { [unowned self] in
+            sessionUserID: { [unowned self] in
                 sessionCalls += 1
-                return session
+                if let sessionGate { await sessionGate() }
+                return session ? userID : nil
             },
             isTeslaConnected: { [unowned self] in
                 connectionCalls += 1
@@ -120,7 +125,7 @@ private func freshDefaults() -> UserDefaults {
 
         #expect(flow.step == .done)
         #expect(flow.lastError == nil)
-        #expect(OnboardingFlow.hasCompleted(in: defaults))
+        #expect(OnboardingFlow.hasCompleted(by: world.userID, in: defaults))
     }
 
     @Test func callbackURLReevaluates() async throws {
@@ -164,7 +169,15 @@ private func freshDefaults() -> UserDefaults {
 
         #expect(handled)
         #expect(flow.step == .connectTesla)
-        #expect(flow.lastError == "Tesla didn't connect (access_denied). Try again.")
+        #expect(flow.lastError == "Tesla access wasn't allowed. Connect again and approve Garage's permissions.")
+    }
+
+    @Test func callbackErrorCodesHaveFixedCopy() {
+        #expect(OnboardingFlow.callbackMessage(for: "state_mismatch") == "The Tesla sign-in expired or came from another attempt. Connect again.")
+        #expect(OnboardingFlow.callbackMessage(for: "bad_state") == OnboardingFlow.callbackMessage(for: "state_mismatch"))
+        #expect(OnboardingFlow.callbackMessage(for: "token_exchange_failed") == "Tesla signed you in, but Garage couldn't finish connecting. Try again in a minute.")
+        // Anything else, including raw exception text from the backend, is never shown as is.
+        #expect(OnboardingFlow.callbackMessage(for: "fetch failed: <script>") == "Tesla sign-in didn't complete. Try again.")
     }
 
     @Test func networkErrorKeepsCurrentStep() async {
@@ -214,6 +227,87 @@ private func freshDefaults() -> UserDefaults {
         OnboardingFlow.resetCompletion(in: defaults)
         await next.evaluate()
         #expect(next.step == .tailscale)
+    }
+
+    @Test func completionFlagIgnoredForDifferentUser() async {
+        let world = FakeWorld()
+        world.allGood()
+        let defaults = freshDefaults()
+        let first = OnboardingFlow(checks: world.checks, defaults: defaults)
+        await first.evaluate()
+        #expect(first.step == .done)
+
+        // Another account on the same device, Tailscale off: the first user's completion does not count.
+        world.userID = UUID()
+        world.reachability = .unreachable
+        let next = OnboardingFlow(checks: world.checks, defaults: defaults)
+        await next.evaluate()
+        #expect(next.step == .tailscale)
+    }
+
+    @Test func everyRouteToSignInClearsCompletion() async {
+        let world = FakeWorld()
+        world.allGood()
+        let defaults = freshDefaults()
+        let flow = OnboardingFlow(checks: world.checks, defaults: defaults)
+        await flow.evaluate()
+        #expect(OnboardingFlow.hasCompleted(by: world.userID, in: defaults))
+
+        world.session = false
+        await flow.evaluate()
+        #expect(flow.step == .signIn)
+        #expect(!OnboardingFlow.hasCompleted(by: world.userID, in: defaults))
+
+        world.session = true
+        await flow.evaluate()
+        #expect(flow.step == .done)
+        world.connectionError = APIError.unauthorized
+        await flow.evaluate()
+        #expect(flow.step == .signIn)
+        #expect(!OnboardingFlow.hasCompleted(by: world.userID, in: defaults))
+    }
+
+    @Test func signedOutHookRunsWhenLandingOnSignIn() async {
+        let world = FakeWorld()
+        world.allGood()
+        let flow = OnboardingFlow(step: .done, checks: world.checks, defaults: freshDefaults())
+        var calls: [Bool] = []
+        flow.onSignedOut = { refused in calls.append(refused) }
+
+        await flow.evaluate()
+        #expect(calls.isEmpty)
+
+        world.connectionError = APIError.unauthorized
+        await flow.evaluate()
+        #expect(calls == [true])
+
+        world.connectionError = nil
+        world.session = false
+        await flow.evaluate()
+        // Already on sign-in and not refused: nothing new to clean up.
+        #expect(calls == [true])
+    }
+
+    @Test func resetMidEvaluateShowsSignIn() async {
+        let world = FakeWorld()
+        world.allGood()
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        world.sessionGate = {
+            for await _ in gate { break }
+        }
+        let flow = OnboardingFlow(step: .done, checks: world.checks, defaults: freshDefaults())
+
+        let evaluation = Task { await flow.evaluate() }
+        while world.sessionCalls == 0 { await Task.yield() }
+        // The SDK emitted .signedOut (revoked refresh token) while the evaluation was waiting.
+        flow.reset()
+        open.yield()
+        open.finish()
+        await evaluation.value
+
+        #expect(flow.step == .signIn)
+        #expect(flow.hasEvaluated)
+        #expect(!flow.isEvaluating)
     }
 
     @Test func connectedCallbackRecognised() throws {

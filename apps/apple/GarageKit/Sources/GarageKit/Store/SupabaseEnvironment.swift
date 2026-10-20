@@ -61,4 +61,14 @@ public final class SupabaseEnvironment: Sendable {
             options: SupabaseClientOptions(auth: .init(emitLocalSessionAsInitialSession: true))
         )
     }
+
+    /// An environment whose sessions live in `authStorage` instead of the keychain (tests).
+    init(config: Config, authStorage: any AuthLocalStorage) {
+        self.config = config
+        client = SupabaseClient(
+            supabaseURL: config.supabaseURL,
+            supabaseKey: config.publishableKey,
+            options: SupabaseClientOptions(auth: .init(storage: authStorage, emitLocalSessionAsInitialSession: true))
+        )
+    }
 }

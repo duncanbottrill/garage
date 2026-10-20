@@ -48,7 +48,7 @@ import Testing
 
     @Test func tailscale() {
         check(
-            TailscaleStep(proxyState: .unreachable, isChecking: false, tailscaleInstalled: false, onOpenTailscale: {}, onCheckAgain: {})
+            TailscaleStep(proxyState: .unreachable, isChecking: false, tailscaleInstalled: false, errorMessage: nil, onOpenTailscale: {}, onCheckAgain: {})
         )
     }
 }

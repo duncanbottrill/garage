@@ -40,7 +40,7 @@ public struct SignInStep: View {
         OnboardingStepLayout(
             step: .signIn,
             title: "Sign in to Garage",
-            message: "Your Garage account holds the car's data. Sign in with Apple to create it.",
+            message: "Your Garage account holds the car's data. Sign in with Apple, or use email.",
             errorMessage: errorMessage
         ) {
             VStack(spacing: Tokens.Space.l) {
@@ -53,7 +53,7 @@ public struct SignInStep: View {
                         RoundedRectangle(cornerRadius: Tokens.Radius.pill, style: .continuous)
                             // Centred on the edge, so it also covers the native button's frame edge,
                             // which `clipShape` does not clip.
-                            .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                            .stroke(Color.white.opacity(Tokens.Opacity.controlEdge), lineWidth: 1)
                     }
                     .disabled(isWorking)
 

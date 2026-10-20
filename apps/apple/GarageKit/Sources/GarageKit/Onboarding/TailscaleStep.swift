@@ -11,6 +11,7 @@ public struct TailscaleStep: View {
     private let proxyState: ProxyReachability.State
     private let isChecking: Bool
     private let tailscaleInstalled: Bool
+    private let errorMessage: String?
     private let onOpenTailscale: () -> Void
     private let onCheckAgain: () -> Void
 
@@ -19,18 +20,21 @@ public struct TailscaleStep: View {
     ///     (the bridge has not published its address yet).
     ///   - isChecking: A probe is running.
     ///   - tailscaleInstalled: Whether the Tailscale app can be opened (names the button).
+    ///   - errorMessage: The last failure's copy (a "Check again" that could not finish).
     ///   - onOpenTailscale: Opens Tailscale, or its App Store page (``TailscaleLink/destination(installed:)``).
     ///   - onCheckAgain: Probes the proxy again.
     public init(
         proxyState: ProxyReachability.State,
         isChecking: Bool,
         tailscaleInstalled: Bool,
+        errorMessage: String? = nil,
         onOpenTailscale: @escaping () -> Void,
         onCheckAgain: @escaping () -> Void
     ) {
         self.proxyState = proxyState
         self.isChecking = isChecking
         self.tailscaleInstalled = tailscaleInstalled
+        self.errorMessage = errorMessage
         self.onOpenTailscale = onOpenTailscale
         self.onCheckAgain = onCheckAgain
     }
@@ -40,7 +44,7 @@ public struct TailscaleStep: View {
             step: .tailscale,
             title: "Reach your home bridge",
             message: "Install Tailscale and sign in with the same account as your home bridge.",
-            errorMessage: nil
+            errorMessage: errorMessage
         ) {
             VStack(spacing: Tokens.Space.l) {
                 OnboardingNotice(icon: .wifiOff, text: statusText, tint: Tokens.Colors.warning)

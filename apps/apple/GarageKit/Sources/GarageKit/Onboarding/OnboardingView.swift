@@ -57,6 +57,7 @@ public struct OnboardingView: View {
                 proxyState: flow.proxyState,
                 isChecking: isChecking,
                 tailscaleInstalled: tailscaleInstalled,
+                errorMessage: flow.lastError,
                 onOpenTailscale: { openURL(TailscaleLink.destination(installed: TailscaleLink.isInstalled())) },
                 onCheckAgain: { Task { await checkAgain() } }
             )

@@ -55,3 +55,10 @@ extension View {
         modifier(GlassSurface(radius: radius, strength: strength))
     }
 }
+
+extension Tokens.Opacity {
+    /// White at this opacity outlines a near-black control on the app background (the Sign in with
+    /// Apple button), where the 8 % ``hairline`` is too faint to read as an edge. Not part of
+    /// `tokens.json` yet; move it there if the web needs the same edge.
+    public static let controlEdge: Double = 0.24
+}

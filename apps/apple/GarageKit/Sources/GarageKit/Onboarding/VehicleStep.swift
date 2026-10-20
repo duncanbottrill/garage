@@ -41,7 +41,7 @@ public struct VehicleStep: View {
     }
 
     /// The last six characters of a VIN, which is how Tesla's own app tells cars apart.
-    public static func vinSuffix(_ vin: String) -> String {
+    nonisolated public static func vinSuffix(_ vin: String) -> String {
         String(vin.suffix(6))
     }
 

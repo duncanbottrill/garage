@@ -78,9 +78,12 @@ enum AppleCredential {
 final class AppleAuthorizer: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
     private var continuation: CheckedContinuation<ASAuthorization, any Error>?
     private var controller: ASAuthorizationController?
+    private var anchor: ASPresentationAnchor?
 
-    /// Shows the Apple sheet and waits for the user. Throws `ASAuthorizationError` (`.canceled` when dismissed).
+    /// Shows the Apple sheet and waits for the user. Throws `ASAuthorizationError` (`.canceled` when
+    /// dismissed), or `ASWebAuthenticationSessionError(.presentationContextInvalid)` with no window to show it on.
     func idToken(nonce: AppleNonce) async throws -> String {
+        anchor = try PresentationAnchor.current()
         let request = ASAuthorizationAppleIDProvider().createRequest()
         AppleCredential.prepare(request, nonce: nonce)
         let authorization = try await withCheckedThrowingContinuation { continuation in
@@ -104,11 +107,13 @@ final class AppleAuthorizer: NSObject, ASAuthorizationControllerDelegate, ASAuth
     }
 
     func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-        PresentationAnchor.current()
+        // Set (or the call threw) before `performRequests()`, and only that request calls back here.
+        anchor!
     }
 
     private func finish(_ result: Result<ASAuthorization, any Error>) {
         controller = nil
+        anchor = nil
         let continuation = continuation
         self.continuation = nil
         continuation?.resume(with: result)
@@ -119,12 +124,15 @@ final class AppleAuthorizer: NSObject, ASAuthorizationControllerDelegate, ASAuth
 @MainActor
 final class WebAuthenticator: NSObject, ASWebAuthenticationPresentationContextProviding {
     private var session: ASWebAuthenticationSession?
+    private var anchor: ASPresentationAnchor?
 
     /// Shows `url` in the system browser sheet, sharing Safari's cookies (`prefersEphemeralWebBrowserSession`
     /// is false, so a saved Tesla login is reused), and returns when it redirects to `callbackURLScheme`.
-    /// Throws `ASWebAuthenticationSessionError` (`.canceledLogin` when the user closes the sheet).
+    /// Throws `ASWebAuthenticationSessionError` (`.canceledLogin` when the user closes the sheet,
+    /// `.presentationContextInvalid` when there is no window to show it on).
     func authenticate(url: URL, callbackURLScheme: String) async throws -> URL {
         session?.cancel()
+        anchor = try PresentationAnchor.current()
         return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(url: url, callbackURLScheme: callbackURLScheme) { [weak self] callback, error in
                 if let callback {
@@ -132,7 +140,10 @@ final class WebAuthenticator: NSObject, ASWebAuthenticationPresentationContextPr
                 } else {
                     continuation.resume(throwing: error ?? ASWebAuthenticationSessionError(.canceledLogin))
                 }
-                Task { @MainActor in self?.session = nil }
+                Task { @MainActor in
+                    self?.session = nil
+                    self?.anchor = nil
+                }
             }
             session.prefersEphemeralWebBrowserSession = false
             session.presentationContextProvider = self
@@ -145,7 +156,8 @@ final class WebAuthenticator: NSObject, ASWebAuthenticationPresentationContextPr
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        PresentationAnchor.current()
+        // Set (or the call threw) before `start()`, and only that session calls back here.
+        anchor!
     }
 
     /// Whether `error` is the user closing the browser sheet.
@@ -157,16 +169,15 @@ final class WebAuthenticator: NSObject, ASWebAuthenticationPresentationContextPr
 /// The window authentication sheets attach to: the key window of the frontmost scene.
 @MainActor
 enum PresentationAnchor {
-    static func current() -> ASPresentationAnchor {
+    /// - Throws: `ASWebAuthenticationSessionError(.presentationContextInvalid)` when no window exists.
+    static func current() throws -> ASPresentationAnchor {
         #if os(iOS)
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let windows = scenes.flatMap(\.windows)
-        if let key = windows.first(where: \.isKeyWindow) ?? windows.first { return key }
-        // Sheets start from a tapped control, so a scene always exists by then.
-        guard let scene = scenes.first else { preconditionFailure("GarageKit: no window scene to present authentication from") }
-        return UIWindow(windowScene: scene)
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+        let window = windows.first(where: \.isKeyWindow) ?? windows.first
         #else
-        return NSApplication.shared.keyWindow ?? NSApplication.shared.windows.first ?? ASPresentationAnchor()
+        let window = NSApplication.shared.keyWindow ?? NSApplication.shared.windows.first
         #endif
+        guard let window else { throw ASWebAuthenticationSessionError(.presentationContextInvalid) }
+        return window
     }
 }

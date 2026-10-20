@@ -42,6 +42,8 @@ public final class AppModel {
     @ObservationIgnored private var pendingNonce: AppleNonce?
     @ObservationIgnored private var authTask: Task<Void, Never>?
     @ObservationIgnored private var reachabilityRunning = false
+    /// Ends the Supabase session on this device (`signOut(scope: .local)`); injectable for tests.
+    @ObservationIgnored private let endSession: @MainActor () async -> Void
 
     /// The app's model on the shared environment (`Config.plist`).
     public convenience init() {
@@ -52,7 +54,18 @@ public final class AppModel {
     ///   - environment: The Supabase project and API.
     ///   - defaults: Where the chosen vehicle and onboarding completion are kept.
     ///   - cache: The snapshot cache the store opens on, cleared on sign-out.
-    public init(environment: SupabaseEnvironment, defaults: UserDefaults = .standard, cache: FileSnapshotCache = FileSnapshotCache()) {
+    public convenience init(environment: SupabaseEnvironment, defaults: UserDefaults = .standard, cache: FileSnapshotCache = FileSnapshotCache()) {
+        self.init(environment: environment, defaults: defaults, cache: cache, checks: nil, endSession: nil)
+    }
+
+    /// The designated init; tests replace the onboarding checks and the session ending.
+    init(
+        environment: SupabaseEnvironment,
+        defaults: UserDefaults,
+        cache: FileSnapshotCache,
+        checks: OnboardingFlow.Checks?,
+        endSession: (@MainActor () async -> Void)?
+    ) {
         let owner = WeakModel()
         self.environment = environment
         self.defaults = defaults
@@ -63,9 +76,25 @@ public final class AppModel {
         user = environment.client.auth.currentUser
         // A session and a finished onboarding on this device: open on Status (and its cached snapshot)
         // straight away; the first evaluation moves elsewhere only if something has changed.
-        let resume = environment.client.auth.currentSession != nil && OnboardingFlow.hasCompleted(in: defaults)
-        flow = OnboardingFlow(step: resume ? .done : .signIn, checks: Self.checks(owner: owner), defaults: defaults)
+        let resume = environment.client.auth.currentSession.map { OnboardingFlow.hasCompleted(by: $0.user.id, in: defaults) } ?? false
+        flow = OnboardingFlow(step: resume ? .done : .signIn, checks: checks ?? Self.checks(owner: owner), defaults: defaults)
+        let client = environment.client
+        self.endSession = endSession ?? {
+            do {
+                try await client.auth.signOut(scope: .local)
+            } catch {
+                // The local session is removed before the network call, so this is only the server side.
+                AppModel.logger.error("Sign-out request failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
         owner.model = self
+        // Landing on sign-in by any route (no session, a refused one) drops the previous account's
+        // car, cache and choices, exactly as an explicit sign-out does.
+        flow.onSignedOut = { [weak self] refused in
+            guard let self else { return }
+            if refused { await self.endSession() }
+            self.resetAfterSignOut()
+        }
     }
 
     // MARK: Lifecycle
@@ -147,12 +176,7 @@ public final class AppModel {
     /// Signs out of this device only (the owner's other devices stay signed in), clears the snapshot
     /// cache (it holds the car's location), forgets the chosen vehicle and returns to the sign-in step.
     public func signOut() async {
-        do {
-            try await client.auth.signOut(scope: .local)
-        } catch {
-            // The local session is removed before the network call, so this is only the server side.
-            Self.logger.error("Sign-out request failed: \(error.localizedDescription, privacy: .public)")
-        }
+        await endSession()
         resetAfterSignOut()
     }
 
@@ -273,13 +297,12 @@ public final class AppModel {
 
     private static func checks(owner: WeakModel) -> OnboardingFlow.Checks {
         OnboardingFlow.Checks(
-            hasSession: {
-                guard let model = owner.model else { return false }
+            sessionUserID: {
+                guard let model = owner.model else { return nil }
                 do {
-                    _ = try await model.client.auth.session
-                    return true
+                    return try await model.client.auth.session.user.id
                 } catch AuthError.sessionMissing {
-                    return false
+                    return nil
                 }
             },
             isTeslaConnected: {
@@ -308,7 +331,7 @@ public final class AppModel {
         user?.identities?.contains { $0.provider == "apple" } ?? false
     }
 
-    private static let logger = Logger(subsystem: "com.duncanbottrill.garage", category: "AppModel")
+    fileprivate static let logger = Logger(subsystem: "com.duncanbottrill.garage", category: "AppModel")
 }
 
 /// Lets closures made during `init` reach the model without a retain cycle.
