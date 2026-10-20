@@ -62,7 +62,7 @@ public struct ChargeSheet: View {
                 Numeral(value: Double(model.chargeLimit), unit: "%", scale: .numeralM)
             }
             .accessibilityHidden(true)
-            LimitSlider(value: model.chargeLimit) { model.setChargeLimit($0) }
+            LimitSlider(value: model.chargeLimit, onChange: { model.setChargeLimit($0) }, onEnd: { model.commitChargeLimit() })
         }
     }
 
@@ -94,6 +94,8 @@ public struct ChargeSheet: View {
 private struct LimitSlider: View {
     let value: Int
     let onChange: (Double) -> Void
+    /// The drag ended: send now rather than after the quiet time.
+    let onEnd: () -> Void
 
     static let knob: CGFloat = 22
     private static let lower = Double(ChargeModel.limitRange.lowerBound)
@@ -127,9 +129,11 @@ private struct LimitSlider: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .contentShape(.rect)
             .gesture(
-                DragGesture(minimumDistance: 0).onChanged { drag in
-                    onChange(Self.lower + Double((drag.location.x - inset) / width) * Self.span)
-                }
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        onChange(Self.lower + Double((drag.location.x - inset) / width) * Self.span)
+                    }
+                    .onEnded { _ in onEnd() }
             )
         }
         .frame(height: 44)

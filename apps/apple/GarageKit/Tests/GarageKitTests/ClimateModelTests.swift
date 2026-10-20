@@ -154,4 +154,60 @@ import Testing
         #expect(car.sent.last == .setPreconditioningMax(on: true, manualOverride: true))
         #expect(model.defrostOn)
     }
+
+    /// Cancel clears the work queued behind the prompt: a second tap on the same seat and the other
+    /// seat's tap are declined too, with no second prompt and no wake, and every seat reverts.
+    @Test func cancelledWakeDeclinesQueuedSeatHeaters() async {
+        let car = FakeCar()
+        let model = model(car, state: .awake("asleep"))
+
+        model.setSeatHeater(.driver, level: 1)
+        model.setSeatHeater(.driver, level: 3)
+        model.setSeatHeater(.passenger, level: 2)
+        #expect(await eventually { model.isAskingToWake })
+        model.cancelWake()
+
+        #expect(await eventually { !model.seatPending(.driver) && !model.seatPending(.passenger) })
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(!model.isAskingToWake, "no second prompt")
+        #expect(car.wakes == 0)
+        #expect(car.sent.isEmpty)
+        #expect(model.seatLevel(.driver) == 0)
+        #expect(model.seatLevel(.passenger) == 0)
+    }
+
+    /// With the sheet gone (no prompt on screen), a debounced target hitting an asleep car is declined
+    /// and reverted, never woken.
+    @Test func debouncedSendWithoutPromptIsDeclined() async {
+        let car = FakeCar()
+        let model = model(car, state: .awake("asleep"))
+        model.runner.hostsPrompt = false
+
+        model.increaseTarget()
+        #expect(model.targetC == 21.5)
+        #expect(await eventually { model.targetC == 21 })
+        #expect(!model.isAskingToWake)
+        #expect(car.wakes == 0)
+        #expect(car.sent.isEmpty)
+    }
+
+    /// A change inside the quiet time restarts it: the one send comes a full quiet time after the
+    /// last change, not after the first.
+    @Test func laterChangeRestartsQuietTime() async {
+        let car = FakeCar()
+        let quiet: Duration = .milliseconds(80)
+        let model = ClimateModel(send: car.send, wake: car.wake, locale: Locale(identifier: "en_GB"), debounce: quiet)
+        model.state = .awake()
+        model.runner.hostsPrompt = true
+
+        model.increaseTarget()
+        try? await Task.sleep(for: .milliseconds(30))
+        model.increaseTarget()
+        let lastChange = ContinuousClock.now
+
+        #expect(await eventually { car.sent.count == 1 })
+        try? await Task.sleep(for: quiet * 2)
+        #expect(car.sent == [.setTemps(driver: 22, passenger: 22)])
+        #expect(car.sentAt[0] - lastChange >= quiet)
+    }
 }

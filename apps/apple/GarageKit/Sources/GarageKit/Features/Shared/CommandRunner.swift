@@ -12,6 +12,10 @@ import Observation
 /// - After a confirmed wake the original command is sent once, without polling. If it is still
 ///   asleep, the toast says ``stillWakingMessage``. For ``wakeGrace`` after a wake the row's stale
 ///   `asleep` does not ask again (the bridge lags the car).
+/// - **Cancel means no.** It declines every command waiting on the prompt and every command queued
+///   behind one, and for ``declineWindow`` any further command that would need a wake is declined
+///   without asking (so a coalesced follow-up cannot raise the prompt again).
+/// - A command that needs a wake while no ``WakePrompt`` is on screen is declined, never woken.
 /// - **One command per wire name at a time.** ``CommandClient`` drops a second send of a name that
 ///   is in flight, so `run` queues it behind the first instead (seat heaters share one name).
 /// - Errors other than asleep put their ``CommandError`` copy in ``toast``.
@@ -48,8 +52,15 @@ public final class CommandRunner {
 
     /// The toast after a wake when the car still answers asleep.
     public static let stillWakingMessage = "The car is still waking. Try again in a moment."
-    /// How long after a wake the row's `asleep` is not trusted.
+    /// How long after a confirmed wake the row's `asleep` is not trusted, in seconds.
+    ///
+    /// The grace only skips the prompt; it can never send `wake_up` (only ``confirmWake()`` does).
+    /// If the car falls back asleep inside the window, its commands fail with the
+    /// ``stillWakingMessage`` toast and the user waits out the rest of the two minutes before the
+    /// prompt is offered again.
     public static let wakeGrace: TimeInterval = 120
+    /// How long after a Cancel commands that need a wake are declined without asking, in seconds.
+    public static let declineWindow: TimeInterval = 1
 
     /// True while the wake prompt should be up.
     public private(set) var isAskingToWake = false
@@ -75,6 +86,9 @@ public final class CommandRunner {
     @ObservationIgnored private var promptWaiters: [CheckedContinuation<Task<CommandError?, Never>?, Never>] = []
     @ObservationIgnored private var wakeTask: Task<CommandError?, Never>?
     @ObservationIgnored private var wokeAt: Date?
+    @ObservationIgnored private var declinedAt: Date?
+    /// Bumped by each Cancel; a command queued before it is declined when its turn comes.
+    @ObservationIgnored private var declineEpoch = 0
 
     /// - Parameters:
     ///   - send: Sends a command (`CommandClient.send(_:vin:)`).
@@ -93,10 +107,13 @@ public final class CommandRunner {
     @discardableResult
     public func run(_ command: Command) async -> Outcome {
         let name = command.name
+        let epoch = declineEpoch
         track(name, by: 1)
         defer { track(name, by: -1) }
         await acquire(name)
         defer { release(name) }
+        // Queued behind a command whose wake the user cancelled: that cancel covers this one too.
+        if declineEpoch != epoch { return .declined }
 
         var woke = false
         if needsWakePrompt {
@@ -160,9 +177,13 @@ public final class CommandRunner {
         waiting.forEach { $0.resume(returning: task) }
     }
 
-    /// The prompt's Cancel button (or the prompt going away): every waiting command is declined.
+    /// The prompt's Cancel button (or the prompt going away): every waiting command is declined,
+    /// every command queued behind one too, and for ``declineWindow`` nothing asks again.
     public func cancelWake() {
+        guard isAskingToWake || !promptWaiters.isEmpty else { return }
         isAskingToWake = false
+        declinedAt = now()
+        declineEpoch += 1
         let waiting = promptWaiters
         promptWaiters = []
         waiting.forEach { $0.resume(returning: nil) }
@@ -187,12 +208,17 @@ public final class CommandRunner {
         return now().timeIntervalSince(wokeAt) < Self.wakeGrace
     }
 
+    private var recentlyDeclined: Bool {
+        guard let declinedAt else { return false }
+        return now().timeIntervalSince(declinedAt) < Self.declineWindow
+    }
+
     private func ensureAwake() async -> WakeResult {
         let task: Task<CommandError?, Never>?
         if let wakeTask {
             task = wakeTask
         } else {
-            guard hostsPrompt else { return .declined }
+            guard hostsPrompt, !recentlyDeclined else { return .declined }
             task = await withCheckedContinuation { continuation in
                 promptWaiters.append(continuation)
                 isAskingToWake = true

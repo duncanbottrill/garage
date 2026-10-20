@@ -11,7 +11,9 @@ import Observation
 /// - Defrost sends `set_preconditioning_max {on, manual_override: true}`.
 ///
 /// The row has no target, seat or defrost fields, so those start at 21 °C, off and off and follow
-/// what the sheet last sent. Everything goes through ``runner``, which asks before waking the car.
+/// what the sheet last sent. A debounced target fires after the quiet time even if the sheet has
+/// closed (up to 800 ms later); if the car is asleep by then it is declined, not woken. Everything
+/// goes through ``runner``, which asks before waking the car.
 @MainActor
 @Observable
 public final class ClimateModel {

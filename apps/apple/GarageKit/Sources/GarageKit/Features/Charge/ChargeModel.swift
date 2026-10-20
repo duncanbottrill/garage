@@ -8,9 +8,21 @@ import Observation
 /// - Start (`charge_start`) needs the port open and the car not charging; Stop (`charge_stop`) needs
 ///   it charging. Start/Stop and the port (`charge_port_door_open`/`close`) show their target at once
 ///   and revert on error.
-/// - Scheduled charging sends `set_scheduled_charging {enable, time}`, `time` in minutes after local
-///   midnight in ``timeZone``; turning it off sends `time: 0`. Picking a time while it is off only
-///   moves the picker.
+/// - Scheduled charging sends `set_scheduled_charging {enable, time}`, `time` in minutes after
+///   midnight; turning it off sends `time: 0`. Picking a time while it is off only moves the picker.
+///   The car reads `time` in its own local time; the app counts it in ``timeZone`` (the device's),
+///   which assumes phone and car are in the same zone.
+///
+/// **Schedule data gap.** The bridge never clears `scheduled_charge_at` (a null from telemetry means
+/// "no change", and the bridge-side clear is not built yet), so the row cannot say "off". The model
+/// tolerates it:
+/// - Any `scheduled_charge_at`, past or future, reads as on: a past one is the daily schedule's last
+///   start. Only a row without one reads as off.
+/// - A sent "off" is kept, with no timer, until `scheduled_charge_at` changes to any other value.
+/// - A sent "on" is kept until the row's `scheduled_charge_at` reports the sent start time.
+///
+/// Debounced sends fire after the quiet time even if the sheet has closed (up to 600 ms later);
+/// if the car is asleep by then, the send is declined rather than woken (no prompt on screen).
 ///
 /// Everything goes through ``runner``, which asks before waking the car.
 @MainActor
@@ -44,7 +56,7 @@ public final class ChargeModel {
             charging.rowChanged(rowCharging)
             port.rowChanged(state?.chargePortOpen)
             limit.rowChanged(state?.chargeLimitSoc)
-            scheduleOverlay.rowChanged(rowSchedule)
+            releaseScheduleIfReported()
         }
     }
 
@@ -67,6 +79,8 @@ public final class ChargeModel {
     @ObservationIgnored private let calendar: Calendar
     @ObservationIgnored private let limitSender = Coalescer<Int>()
     @ObservationIgnored private let scheduleSender = Coalescer<Schedule>()
+    /// `scheduled_charge_at` as the row had it when the shown schedule was sent.
+    @ObservationIgnored private var scheduleSentAgainst: Date?
 
     private static let limitName = Command.setChargeLimit(percent: 0).name
     private static let scheduleName = Command.setScheduledCharging(enable: false, time: 0).name
@@ -90,7 +104,8 @@ public final class ChargeModel {
         charging = PendingOverlay(hold: hold)
         port = PendingOverlay(hold: hold)
         limit = PendingOverlay(hold: hold)
-        scheduleOverlay = PendingOverlay(hold: hold)
+        // No timer: the row may never report "off" (see the type's schedule data gap).
+        scheduleOverlay = PendingOverlay(hold: nil)
         self.now = now
         self.timeZone = timeZone
         self.debounce = debounce
@@ -120,7 +135,7 @@ public final class ChargeModel {
     public var canStart: Bool { portOpen == true && !isCharging }
     /// Stop is offered: the car is charging.
     public var canStop: Bool { isCharging }
-    /// The schedule shown: the one being set, else the row's (on while `scheduled_charge_at` is ahead).
+    /// The schedule shown: the one being set, else the row's (on whenever `scheduled_charge_at` is set).
     public var schedule: Schedule { scheduleOverlay.value ?? rowSchedule }
     /// ``schedule``'s start time today, for the time picker.
     public var scheduleDate: Date { date(minutesAfterMidnight: schedule.minutes) }
@@ -173,6 +188,11 @@ public final class ChargeModel {
         limitSender.submit(percent, after: debounce)
     }
 
+    /// The slider was let go: send the waiting limit now instead of after the quiet time (still once).
+    public func commitChargeLimit() {
+        limitSender.flush()
+    }
+
     /// Starts charging, or stops it while charging; ignored when not offered or in flight.
     public func toggleCharging() async {
         let stopping = isCharging
@@ -221,7 +241,18 @@ public final class ChargeModel {
 
     private var rowSchedule: Schedule {
         guard let at = state?.scheduledChargeAt else { return Schedule(enabled: false, minutes: 0) }
-        return Schedule(enabled: at > now(), minutes: minutesAfterMidnight(at))
+        return Schedule(enabled: true, minutes: minutesAfterMidnight(at))
+    }
+
+    /// Drops a sent schedule once the row reflects it: "off" when `scheduled_charge_at` has changed
+    /// since the send, "on" when it reports the sent start time.
+    private func releaseScheduleIfReported() {
+        guard scheduleOverlay.isSent, let sent = scheduleOverlay.value else { return }
+        let at = state?.scheduledChargeAt
+        let reported = sent.enabled
+            ? at.map { minutesAfterMidnight($0) == sent.minutes } ?? false
+            : at != scheduleSentAgainst
+        if reported { scheduleOverlay.clear() }
     }
 
     private func deliverLimit(_ percent: Int) async {
@@ -233,6 +264,11 @@ public final class ChargeModel {
     private func deliverSchedule(_ schedule: Schedule) async {
         let outcome = await runner.run(.setScheduledCharging(enable: schedule.enabled, time: schedule.enabled ? schedule.minutes : 0))
         guard !scheduleSender.hasQueued else { return }
-        if outcome == .sent { scheduleOverlay.markSent() } else { scheduleOverlay.failed() }
+        if outcome == .sent {
+            scheduleSentAgainst = state?.scheduledChargeAt
+            scheduleOverlay.markSent()
+        } else {
+            scheduleOverlay.failed()
+        }
     }
 }

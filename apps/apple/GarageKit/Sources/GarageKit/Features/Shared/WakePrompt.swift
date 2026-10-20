@@ -21,11 +21,28 @@ struct WakePrompt: ViewModifier {
                 // Dismissal goes through the buttons; the setter must not race them.
                 isPresented: Binding(get: { runner.isAskingToWake }, set: { _ in })
             ) {
-                Button("Cancel", role: .cancel) { runner.cancelWake() }
-                Button(Self.wakeButton) { runner.confirmWake() }
+                Self.buttons(runner)
             } message: {
                 Text(Self.message)
             }
+            .modifier(WakePromptHost(runner: runner))
+    }
+
+    /// Cancel and Wake, for a surface that folds the prompt into its own alert (Status).
+    @ViewBuilder
+    static func buttons(_ runner: CommandRunner) -> some View {
+        Button("Cancel", role: .cancel) { runner.cancelWake() }
+        Button(wakeButton) { runner.confirmWake() }
+    }
+}
+
+/// Marks `runner`'s prompt as shown by this surface while it is on screen, and cancels a waiting
+/// prompt when it goes away.
+struct WakePromptHost: ViewModifier {
+    let runner: CommandRunner
+
+    func body(content: Content) -> some View {
+        content
             .onAppear { runner.hostsPrompt = true }
             .onDisappear {
                 runner.hostsPrompt = false

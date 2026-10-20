@@ -21,6 +21,13 @@ final class Coalescer<Value> {
     /// True while a value is waiting for its quiet time or for the delivery in flight.
     var hasQueued: Bool { latest != nil }
 
+    /// Ends a waiting quiet time now (a slider let go): the latest value goes out once, at once.
+    func flush() {
+        guard timer != nil else { return }
+        timer?.cancel()
+        due()
+    }
+
     /// Makes `value` the one to deliver, `quiet` after the last call (`.zero`: as soon as possible).
     func submit(_ value: Value, after quiet: Duration) {
         latest = value
@@ -59,8 +66,9 @@ final class Coalescer<Value> {
 }
 
 /// A value shown ahead of the car's row while a change is on its way: set at once, and after a
-/// successful send kept until the row agrees or ``hold`` passes. A failure goes back to what was
-/// shown before the change: the last value sent (if it is still held), else the row.
+/// successful send kept until the row agrees or ``hold`` passes (with no hold, until the owner calls
+/// ``clear()``). A failure goes back to what was shown before the change: the last value sent (if it
+/// is still held), else the row.
 @MainActor
 @Observable
 final class PendingOverlay<Value: Equatable> {
@@ -72,10 +80,11 @@ final class PendingOverlay<Value: Equatable> {
     @ObservationIgnored private var fallback: Value?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var holdTask: Task<Void, Never>?
-    @ObservationIgnored private let hold: Duration
+    @ObservationIgnored private let hold: Duration?
 
-    /// - Parameter hold: How long a sent value waits for the row to agree.
-    init(hold: Duration) {
+    /// - Parameter hold: How long a sent value waits for the row to agree; nil keeps it until
+    ///   ``clear()`` (for a column the bridge may never update).
+    init(hold: Duration?) {
         self.hold = hold
     }
 
@@ -107,13 +116,17 @@ final class PendingOverlay<Value: Equatable> {
         startHold()
     }
 
+    /// True when ``value`` has been sent and is waiting for the row.
+    var isSent: Bool { sent && value != nil }
+
     /// A new row: a sent value the row now reports is no longer needed.
     func rowChanged(_ row: Value?) {
         guard sent, let value, row == value else { return }
         clear()
     }
 
-    private func clear() {
+    /// The row speaks again.
+    func clear() {
         value = nil
         fallback = nil
         restart()
@@ -121,6 +134,7 @@ final class PendingOverlay<Value: Equatable> {
 
     private func startHold() {
         sent = true
+        guard let hold else { return }
         let mine = generation
         holdTask = Task { [weak self, hold] in
             try? await Task.sleep(for: hold)

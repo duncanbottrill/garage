@@ -121,4 +121,74 @@ import Testing
         #expect(model.portOpen == true, "reverted to open")
         #expect(model.runner.toast?.message == CommandError.unreachable.errorDescription)
     }
+
+    /// The bridge never clears `scheduled_charge_at`, so a sent "off" holds (no timer) until that
+    /// column changes, whatever else the row reports in the meantime.
+    @Test func disableHoldsUntilRowChanges() async {
+        let car = FakeCar()
+        var state = VehicleState.awake()
+        state.scheduledChargeAt = now.addingTimeInterval(9 * 3600) // 00:30 London
+        let model = ChargeModel(send: car.send, wake: car.wake, now: { [now] in now }, timeZone: london, debounce: debounce, hold: .milliseconds(20))
+        model.state = state
+        model.runner.hostsPrompt = true
+        #expect(model.schedule == ChargeModel.Schedule(enabled: true, minutes: 30))
+
+        model.setScheduleEnabled(false)
+        #expect(await eventually { car.sent.count == 1 })
+        #expect(car.sent == [.setScheduledCharging(enable: false, time: 0)])
+
+        try? await Task.sleep(for: .milliseconds(100)) // well past the 20 ms hold
+        state.soc = 61 // a row update that leaves the schedule column alone
+        model.state = state
+        #expect(!model.schedule.enabled, "stays off: the column did not change")
+
+        state.scheduledChargeAt = now.addingTimeInterval(10 * 3600) // 01:30 London
+        model.state = state
+        #expect(model.schedule == ChargeModel.Schedule(enabled: true, minutes: 90), "a new value: the row speaks again")
+    }
+
+    /// A sent "on" holds until the row reports that start time.
+    @Test func enableHoldsUntilRowReportsTime() async {
+        let car = FakeCar()
+        let model = ChargeModel(send: car.send, wake: car.wake, now: { [now] in now }, timeZone: london, debounce: debounce, hold: .milliseconds(20))
+        model.state = .awake()
+        model.runner.hostsPrompt = true
+        model.setScheduleTime(Date(timeIntervalSince1970: 1_792_535_400)) // 23:30 London
+        model.setScheduleEnabled(true)
+        #expect(await eventually { car.sent.count == 1 })
+
+        try? await Task.sleep(for: .milliseconds(100))
+        var state = VehicleState.awake()
+        state.soc = 61
+        model.state = state
+        #expect(model.schedule == ChargeModel.Schedule(enabled: true, minutes: 1410))
+
+        state.scheduledChargeAt = Date(timeIntervalSince1970: 1_792_535_400)
+        model.state = state
+        #expect(model.schedule == ChargeModel.Schedule(enabled: true, minutes: 1410))
+    }
+
+    /// A start time already past today is the daily schedule's last run: still on.
+    @Test func pastScheduleStillShowsEnabled() {
+        var state = VehicleState.awake()
+        state.scheduledChargeAt = now.addingTimeInterval(-3 * 3600) // 12:30 London
+        let model = model(FakeCar(), state: state)
+        #expect(model.schedule == ChargeModel.Schedule(enabled: true, minutes: 750))
+    }
+
+    /// Letting go of the slider sends the limit at once instead of after the quiet time, still once.
+    @Test func releasingSliderSendsOnce() async {
+        let car = FakeCar()
+        let model = ChargeModel(send: car.send, wake: car.wake, now: { [now] in now }, timeZone: london, debounce: .seconds(5))
+        model.state = .awake()
+        model.runner.hostsPrompt = true
+
+        model.setChargeLimit(70)
+        model.setChargeLimit(75)
+        model.commitChargeLimit()
+        #expect(await eventually(timeout: .seconds(1)) { car.sent.count == 1 })
+        model.commitChargeLimit()
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(car.sent == [.setChargeLimit(percent: 75)])
+    }
 }

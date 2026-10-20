@@ -20,13 +20,17 @@ public struct StatusView: View {
     static let wideLayoutWidth: CGFloat = 780
     /// The least map the docked sheet leaves visible below the status bar when it grows.
     static let minimumMapHeight: CGFloat = 160
-    /// How long the frunk confirmation needs to go away before a wake prompt can be presented.
-    static let alertHandoff: Duration = .milliseconds(450)
 
     private enum Source {
         case app(AppModel)
         /// A fixed screen for snapshots and previews: no clock, no commands, no network.
         case fixed(StatusModel, trail: [TrailPoint], pending: Set<String>)
+    }
+
+    /// Status's one alert: the frunk confirmation, then (if the car is asleep) the wake prompt. One
+    /// `.alert` presents both, so the second waits for the first to go instead of being dropped.
+    private enum StatusAlert {
+        case frunk, wake
     }
 
     private enum ControlSheetKind: String, Identifiable {
@@ -80,13 +84,27 @@ public struct StatusView: View {
 
     public var body: some View {
         content
-            .alert("Open the frunk?", isPresented: $confirmingFrunk) {
-                Button("Open frunk") { openFrunk() }
-                Button("Cancel", role: .cancel) {}
+            .alert(alertTitle, isPresented: alertShown) {
+                switch activeAlert {
+                case .frunk:
+                    Button("Open frunk") {
+                        confirmingFrunk = false
+                        openFrunk()
+                    }
+                    Button("Cancel", role: .cancel) { confirmingFrunk = false }
+                case .wake:
+                    WakePrompt.buttons(runner)
+                case nil:
+                    EmptyView()
+                }
             } message: {
-                Text("The lid pops up. Check nothing is resting on it.")
+                switch activeAlert {
+                case .frunk: Text("The lid pops up. Check nothing is resting on it.")
+                case .wake: Text(WakePrompt.message)
+                case nil: EmptyView()
+                }
             }
-            .wakePrompt(runner)
+            .modifier(WakePromptHost(runner: runner))
             .autoDismissingToast(runner)
             .sheet(item: $presentedSheet) { controlSheet($0) }
     }
@@ -112,7 +130,9 @@ public struct StatusView: View {
             }
             .task(id: store.vehicle?.id) { await loadTrail(app) }
             .onChange(of: store.vehicle?.id) {
-                // A different car: the sheets' remembered target, seats and schedule belong to the old one.
+                // A different car: the sheets' remembered target, seats and schedule belong to the old
+                // one. Close any open sheet first so it never renders without its model.
+                presentedSheet = nil
                 climate = nil
                 charge = nil
             }
@@ -230,13 +250,23 @@ public struct StatusView: View {
         }
     }
 
+    private var activeAlert: StatusAlert? {
+        if confirmingFrunk { return .frunk }
+        return runner.isAskingToWake ? .wake : nil
+    }
+
+    private var alertTitle: String {
+        activeAlert == .wake ? WakePrompt.title : "Open the frunk?"
+    }
+
+    /// Dismissal goes through the buttons, which clear the frunk flag or answer the prompt.
+    private var alertShown: Binding<Bool> {
+        Binding(get: { activeAlert != nil }, set: { _ in })
+    }
+
     private func openFrunk() {
         guard case .app = source else { return }
-        Task {
-            // The frunk confirmation is still going away; a wake prompt presented now would be dropped.
-            if runner.needsWakePrompt { try? await Task.sleep(for: Self.alertHandoff) }
-            await runner.run(.actuateFrunk)
-        }
+        Task { await runner.run(.actuateFrunk) }
     }
 
     /// `send` and `wake` for the app's car, read at call time (the client is replaced on sign-out).

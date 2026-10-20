@@ -6,6 +6,8 @@ import Foundation
 @MainActor
 final class FakeCar {
     private(set) var sent: [Command] = []
+    /// When each of ``sent`` arrived.
+    private(set) var sentAt: [ContinuousClock.Instant] = []
     private(set) var wakes = 0
     /// While true, each send is recorded and then waits for ``release()``.
     var holding = false
@@ -38,6 +40,7 @@ final class FakeCar {
 
     private func perform(_ command: Command) async throws -> Bool {
         sent.append(command)
+        sentAt.append(.now)
         if holding {
             await withCheckedContinuation { held.append($0) }
         }
@@ -47,6 +50,22 @@ final class FakeCar {
         }
         if let failure { throw failure }
         return true
+    }
+}
+
+/// A clock the test moves by hand.
+@MainActor
+final class TestClock {
+    var now: Date
+
+    init(_ now: Date = Date(timeIntervalSince1970: 1_792_506_600)) {
+        self.now = now
+    }
+
+    var read: @MainActor () -> Date { { [unowned self] in self.now } }
+
+    func advance(_ seconds: TimeInterval) {
+        now = now.addingTimeInterval(seconds)
     }
 }
 

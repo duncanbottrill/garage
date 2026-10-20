@@ -1,0 +1,97 @@
+import Foundation
+import Testing
+@testable import GarageKit
+
+/// The wake rules ``CommandRunner`` adds on top of the prompt: the grace after a wake and the
+/// short window after a Cancel.
+@MainActor @Suite struct CommandRunnerTests {
+    private func runner(_ car: FakeCar, clock: TestClock, asleep: Bool = true) -> CommandRunner {
+        let runner = CommandRunner(send: car.send, wake: car.wake, now: clock.read)
+        runner.isAsleep = { asleep }
+        runner.hostsPrompt = true
+        return runner
+    }
+
+    /// Wakes once through the prompt and returns after the command went out.
+    private func wakeAndSend(_ runner: CommandRunner) async {
+        let first = Task { await runner.run(.flashLights) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.confirmWake()
+        #expect(await first.value == .sent)
+    }
+
+    /// Inside the 120 s grace a stale `asleep` row sends without asking; past it, the prompt is back.
+    @Test func graceSkipsPromptThenExpires() async {
+        let car = FakeCar()
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+        await wakeAndSend(runner)
+        #expect(car.wakes == 1)
+
+        clock.advance(119)
+        #expect(!runner.needsWakePrompt)
+        #expect(await runner.run(.honkHorn) == .sent)
+        #expect(car.sent == [.flashLights, .honkHorn])
+        #expect(car.wakes == 1)
+
+        clock.advance(2) // 121 s after the wake
+        #expect(runner.needsWakePrompt)
+        let late = Task { await runner.run(.honkHorn) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.cancelWake()
+        #expect(await late.value == .declined)
+        #expect(car.wakes == 1)
+    }
+
+    /// An asleep answer inside the grace is "still waking": no prompt and no second wake.
+    @Test func asleepErrorInsideGraceIsStillWaking() async {
+        let car = FakeCar()
+        let clock = TestClock()
+        let runner = runner(car, clock: clock, asleep: false)
+        car.asleepFailures = 1
+        await wakeAndSend(runner) // asleep error → prompt → wake → resend succeeds
+
+        clock.advance(30)
+        car.asleepFailures = 1
+        #expect(await runner.run(.honkHorn) == .failed)
+        #expect(!runner.isAskingToWake)
+        #expect(car.wakes == 1)
+        #expect(runner.toast?.message == CommandRunner.stillWakingMessage)
+    }
+
+    /// For a second after Cancel, a command that needs a wake is declined without asking again.
+    @Test func cancelDeclinesForOneSecond() async {
+        let car = FakeCar()
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+        #expect(CommandRunner.declineWindow == 1)
+
+        let first = Task { await runner.run(.flashLights) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.cancelWake()
+        #expect(await first.value == .declined)
+
+        clock.advance(0.5)
+        #expect(await runner.run(.honkHorn) == .declined)
+        #expect(!runner.isAskingToWake)
+
+        clock.advance(0.6)
+        let later = Task { await runner.run(.honkHorn) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.cancelWake()
+        _ = await later.value
+        #expect(car.wakes == 0)
+        #expect(car.sent.isEmpty)
+    }
+
+    /// Without a prompt on screen, a command that needs a wake is declined at once.
+    @Test func noPromptHostDeclines() async {
+        let car = FakeCar()
+        let runner = runner(car, clock: TestClock())
+        runner.hostsPrompt = false
+        #expect(await runner.run(.flashLights) == .declined)
+        #expect(!runner.isAskingToWake)
+        #expect(car.wakes == 0)
+        #expect(car.sent.isEmpty)
+    }
+}
