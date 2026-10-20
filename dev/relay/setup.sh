@@ -3,8 +3,8 @@
 # Tailscale, for owners behind CGNAT. Raw TCP passthrough: TLS (and the car's
 # client certificate) terminates on the Green, never here.
 #
-# Run as root on a fresh Ubuntu 22.04/24.04 VM (tested target: Oracle Cloud
-# Always Free, VM.Standard.E2.1.Micro, London):
+# Run as root on a fresh Ubuntu 22.04/24.04 or Oracle Linux 8/9 VM (target:
+# Oracle Cloud Always Free, VM.Standard.E2.1.Micro, London):
 #   curl -fsSL https://raw.githubusercontent.com/duncanbottrill/garage/main/dev/relay/setup.sh \
 #     | sudo TS_AUTHKEY='tskey-auth-...' bash
 #
@@ -24,10 +24,21 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-export DEBIAN_FRONTEND=noninteractive
-echo "==> packages"
-apt-get update -qq
-apt-get install -y -qq socat curl ca-certificates iptables-persistent >/dev/null
+if command -v dnf >/dev/null 2>&1; then
+  OS=rhel
+else
+  OS=debian
+fi
+
+echo "==> packages (${OS})"
+if [ "${OS}" = rhel ]; then
+  dnf install -y -q socat curl ca-certificates firewalld >/dev/null
+  systemctl enable --now firewalld >/dev/null
+else
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq socat curl ca-certificates iptables-persistent >/dev/null
+fi
 
 echo "==> tailscale"
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -37,11 +48,17 @@ tailscale up --authkey="${TS_AUTHKEY}" --hostname="${RELAY_NAME}" --accept-dns=f
 echo "    tailnet node: $(tailscale status --self --json | sed -n 's/.*"DNSName": *"\([^"]*\)".*/\1/p' | head -1)"
 
 echo "==> firewall: allow inbound TCP 443"
-# Oracle's Ubuntu images ship an INPUT chain that rejects everything but SSH.
-if ! iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null; then
-  iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT
+if [ "${OS}" = rhel ]; then
+  # Oracle Linux images use firewalld (only SSH open by default).
+  firewall-cmd --permanent --add-port=443/tcp >/dev/null
+  firewall-cmd --reload >/dev/null
+else
+  # Oracle's Ubuntu images ship an INPUT chain that rejects everything but SSH.
+  if ! iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null; then
+    iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT
+  fi
+  netfilter-persistent save >/dev/null
 fi
-netfilter-persistent save >/dev/null
 
 echo "==> relay service (443 -> ${TARGET})"
 cat > /etc/systemd/system/garage-relay.service <<UNIT
