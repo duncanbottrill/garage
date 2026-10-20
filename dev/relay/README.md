@@ -12,7 +12,7 @@ on the relay.
 1. Sign up at https://cloud.oracle.com (Always Free tier; home region
    **UK South (London)**). A card is needed for identity checks only.
 2. Compute → Instances → **Create instance**: name `garage-relay`, image
-   **Ubuntu 24.04**, shape **VM.Standard.E2.1.Micro** (Always Free; the Ampere
+   **Ubuntu 24.04** or **Oracle Linux 9** (the script handles both), shape **VM.Standard.E2.1.Micro** (Always Free; the Ampere
    A1 shape also works if capacity is available), default VCN/public subnet,
    **assign a public IPv4 address**, and download the generated SSH private key.
 3. Networking → Virtual cloud networks → your VCN → the public subnet →
@@ -22,7 +22,7 @@ on the relay.
    `tag:garage` Tailscale auth key (never paste the key anywhere else):
 
    ```bash
-   ssh -i ~/Downloads/ssh-key-*.key ubuntu@<public-ip>
+   ssh -i ~/Downloads/ssh-key-*.key ubuntu@<public-ip>   # user is `opc` on Oracle Linux
    curl -fsSL https://raw.githubusercontent.com/duncanbottrill/garage/main/dev/relay/setup.sh \
      | sudo TS_AUTHKEY='tskey-auth-...' bash
    ```
