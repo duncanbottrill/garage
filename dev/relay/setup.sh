@@ -30,10 +30,20 @@ else
   OS=debian
 fi
 
+echo "==> swap (the 1 GB Always Free shape hangs under dnf without it)"
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+  chmod 600 /swapfile
+  mkswap /swapfile >/dev/null
+  swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 echo "==> packages (${OS})"
 if [ "${OS}" = rhel ]; then
-  dnf install -y -q socat curl ca-certificates firewalld >/dev/null
-  systemctl enable --now firewalld >/dev/null
+  # Oracle Linux images run firewalld already; keep the install minimal.
+  dnf install -y -q --setopt=install_weak_deps=False socat >/dev/null
+  systemctl enable --now firewalld >/dev/null 2>&1 || true
 else
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
