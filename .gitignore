@@ -11,3 +11,5 @@ supabase/.temp
 .superpowers/
 *.tsbuildinfo
 dev/tls/
+# Raw MQTT captures carry the real VIN and GPS position; only scrubbed copies are committed.
+dev/replay/fixtures/live-*.log
