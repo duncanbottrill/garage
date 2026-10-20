@@ -24,6 +24,22 @@
 # tailnet mode). Without the option, the Tailscale-cert path below runs
 # unchanged, apart from removing a marker a hostname-mode run left behind.
 #
+# Proxy certificate (both modes, only when tailscale_enabled is true):
+# tesla-http-proxy's listener is served to the tailnet on 4443 as a raw TCP
+# forward, so the certificate it presents is what the iPhone/Mac app sees.
+# `tailscale cert` for the node's FQDN is written to /data/proxy-tls/
+# {cert,key}.pem (temp files, then `mv`, key first, key 600) right after the
+# telemetry certificate step and every 24h after that; when the leaf's
+# SHA-256 fingerprint changes the proxy is restarted to load it. In
+# hostname mode the FQDN may appear after this service starts (it does not
+# wait for tailscale), so the proxy step re-checks every 30s until
+# /data/tailscale/fqdn exists and retries a failed `tailscale cert` after 10
+# minutes, independently of the private-CA schedule. The fallback mode makes
+# the same call for the proxy rather than copying /data/tls: tailscaled
+# serves the second request from its own certificate cache, and one code
+# path covers both modes. With tailscale disabled the proxy keeps the
+# self-signed pair proxy/run generates.
+#
 # The option is normalised exactly as the ingest's options.ts does it:
 # leading/trailing whitespace trimmed, lower-cased, and anything left that
 # is not [a-z0-9.-] (inner whitespace included) is an error: logged, then
@@ -32,6 +48,54 @@ set -euo pipefail
 # Byte-wise trimming/matching: under C.UTF-8 [:space:] would also trim
 # Unicode spaces, which the ingest (ASCII-only) rejects.
 export LC_ALL=C
+
+TS=(tailscale --socket=/run/tailscale/tailscaled.sock)
+FQDN_FILE=/data/tailscale/fqdn
+PROXY_TLS_DIR=/data/proxy-tls
+PROXY_SERVICE=/run/service/proxy
+
+# SHA-256 fingerprint of the first certificate in $1, or "" if unreadable.
+leaf_fingerprint() {
+  [ -s "$1" ] || return 0
+  openssl x509 -noout -fingerprint -sha256 -in "$1" 2>/dev/null || true
+}
+
+# Fetches/renews the Let's Encrypt pair for FQDN $1 into
+# ${PROXY_TLS_DIR}/{cert,key}.pem and restarts the proxy when the leaf
+# changed. Returns 1 (temp files removed, live pair untouched) when
+# `tailscale cert` fails or returns no readable certificate.
+refresh_proxy_cert() {
+  local fqdn="$1" old_fp new_fp
+  mkdir -p "${PROXY_TLS_DIR}"
+  old_fp="$(leaf_fingerprint "${PROXY_TLS_DIR}/cert.pem")"
+  if ! "${TS[@]}" cert --cert-file "${PROXY_TLS_DIR}/cert.pem.tmp" --key-file "${PROXY_TLS_DIR}/key.pem.tmp" "${fqdn}"; then
+    rm -f "${PROXY_TLS_DIR}/cert.pem.tmp" "${PROXY_TLS_DIR}/key.pem.tmp"
+    return 1
+  fi
+  chmod 600 "${PROXY_TLS_DIR}/key.pem.tmp"
+  new_fp="$(leaf_fingerprint "${PROXY_TLS_DIR}/cert.pem.tmp")"
+  if [ -z "${new_fp}" ] || [ ! -s "${PROXY_TLS_DIR}/key.pem.tmp" ]; then
+    rm -f "${PROXY_TLS_DIR}/cert.pem.tmp" "${PROXY_TLS_DIR}/key.pem.tmp"
+    bashio::log.error "tlscert: tailscale cert for ${fqdn} wrote no usable certificate for the proxy"
+    return 1
+  fi
+
+  # Key first, then cert: by the time the new cert is visible, its key is too.
+  mv "${PROXY_TLS_DIR}/key.pem.tmp" "${PROXY_TLS_DIR}/key.pem"
+  mv "${PROXY_TLS_DIR}/cert.pem.tmp" "${PROXY_TLS_DIR}/cert.pem"
+
+  if [ "${new_fp}" = "${old_fp}" ]; then
+    bashio::log.info "tlscert: proxy certificate for ${fqdn} unchanged"
+    return 0
+  fi
+  bashio::log.info "tlscert: proxy certificate for ${fqdn} installed in ${PROXY_TLS_DIR}"
+  if [ -d "${PROXY_SERVICE}" ]; then
+    bashio::log.info "tlscert: restarting the proxy to load it"
+    s6-svc -r "${PROXY_SERVICE}" || bashio::log.error "tlscert: could not restart ${PROXY_SERVICE}"
+  else
+    bashio::log.info "tlscert: proxy service not up yet, it will load the new pair when it starts"
+  fi
+}
 
 TELEMETRY_HOSTNAME=""
 if bashio::config.has_value 'telemetry_hostname'; then
@@ -54,35 +118,79 @@ if [ -n "${TELEMETRY_HOSTNAME}" ]; then
   rm -f "${MARKER}"
   bashio::log.info "tlscert: telemetry_hostname is ${TELEMETRY_HOSTNAME}; serving fleet-telemetry with the add-on's private CA (/data/ca), not a Tailscale certificate"
 
+  PROXY_CERT=false
+  if bashio::config.true 'tailscale_enabled'; then
+    PROXY_CERT=true
+  else
+    bashio::log.info "tlscert: tailscale disabled; the proxy keeps its self-signed pair"
+  fi
+
+  # Next run (epoch seconds) of each step: the private-CA leaf every 24h
+  # (10 minutes after a failure); the proxy certificate after it and then
+  # every 24h, every 30s while the FQDN is missing, 10 minutes after a
+  # failed `tailscale cert`.
+  CA_DUE=0
+  PROXY_DUE=0
+  WAITING_FQDN=false
   while true; do
-    if RESULT="$(GARAGE_DATA_DIR=/data /usr/bin/garage-private-ca "${TELEMETRY_HOSTNAME}")"; then
-      printf '%s\n' "${TELEMETRY_HOSTNAME}" > "${MARKER}.tmp"
-      mv "${MARKER}.tmp" "${MARKER}"
-      case "${RESULT}" in
-        issued|renewed)
-          bashio::log.info "tlscert: private-CA certificate for ${TELEMETRY_HOSTNAME} ${RESULT}"
-          if [ -d /run/service/telemetry ]; then
-            bashio::log.info "tlscert: restarting fleet-telemetry to load it"
-            s6-svc -r /run/service/telemetry || bashio::log.error "tlscert: could not restart /run/service/telemetry"
-          else
-            bashio::log.info "tlscert: telemetry service not up yet, it will load the new pair when it starts"
-          fi
-          ;;
-        *)
-          bashio::log.info "tlscert: private-CA certificate for ${TELEMETRY_HOSTNAME} unchanged"
-          ;;
-      esac
-    else
-      RC=$?
-      if [ "${RC}" -eq 2 ]; then
-        bashio::log.error "tlscert: telemetry_hostname '${TELEMETRY_HOSTNAME}' is not a valid DNS name (e.g. telemetry.garage.duncanbottrill.com). Fix the option; idling."
-        exec sleep infinity
+    NOW="$(date +%s)"
+    if [ "${NOW}" -ge "${CA_DUE}" ]; then
+      CA_DUE=$((NOW + 86400))
+      if RESULT="$(GARAGE_DATA_DIR=/data /usr/bin/garage-private-ca "${TELEMETRY_HOSTNAME}")"; then
+        printf '%s\n' "${TELEMETRY_HOSTNAME}" > "${MARKER}.tmp"
+        mv "${MARKER}.tmp" "${MARKER}"
+        case "${RESULT}" in
+          issued|renewed)
+            bashio::log.info "tlscert: private-CA certificate for ${TELEMETRY_HOSTNAME} ${RESULT}"
+            if [ -d /run/service/telemetry ]; then
+              bashio::log.info "tlscert: restarting fleet-telemetry to load it"
+              s6-svc -r /run/service/telemetry || bashio::log.error "tlscert: could not restart /run/service/telemetry"
+            else
+              bashio::log.info "tlscert: telemetry service not up yet, it will load the new pair when it starts"
+            fi
+            ;;
+          *)
+            bashio::log.info "tlscert: private-CA certificate for ${TELEMETRY_HOSTNAME} unchanged"
+            ;;
+        esac
+      else
+        RC=$?
+        if [ "${RC}" -eq 2 ]; then
+          bashio::log.error "tlscert: telemetry_hostname '${TELEMETRY_HOSTNAME}' is not a valid DNS name (e.g. telemetry.garage.duncanbottrill.com). Fix the option; idling."
+          exec sleep infinity
+        fi
+        bashio::log.error "tlscert: could not issue the private-CA certificate for ${TELEMETRY_HOSTNAME}; retrying in 10 minutes"
+        CA_DUE=$((NOW + 600))
       fi
-      bashio::log.error "tlscert: could not issue the private-CA certificate for ${TELEMETRY_HOSTNAME}; retrying in 10 minutes"
-      sleep 600
-      continue
     fi
-    sleep 86400
+
+    if [ "${PROXY_CERT}" = true ] && [ "${NOW}" -ge "${PROXY_DUE}" ]; then
+      if [ -s "${FQDN_FILE}" ]; then
+        WAITING_FQDN=false
+        FQDN="$(cat "${FQDN_FILE}")"
+        if refresh_proxy_cert "${FQDN}"; then
+          PROXY_DUE=$((NOW + 86400))
+        else
+          bashio::log.error "tlscert: tailscale cert for the proxy (${FQDN}) failed; retrying in 10 minutes"
+          PROXY_DUE=$((NOW + 600))
+        fi
+      else
+        if [ "${WAITING_FQDN}" = false ]; then
+          bashio::log.info "tlscert: waiting for ${FQDN_FILE} before fetching the proxy certificate (tailscale not up yet)"
+          WAITING_FQDN=true
+        fi
+        PROXY_DUE=$((NOW + 30))
+      fi
+    fi
+
+    NEXT="${CA_DUE}"
+    if [ "${PROXY_CERT}" = true ] && [ "${PROXY_DUE}" -lt "${NEXT}" ]; then
+      NEXT="${PROXY_DUE}"
+    fi
+    NOW="$(date +%s)"
+    if [ "${NEXT}" -gt "${NOW}" ]; then
+      sleep "$((NEXT - NOW))"
+    fi
   done
 fi
 
@@ -95,17 +203,9 @@ if ! bashio::config.true 'tailscale_enabled'; then
   exec sleep infinity
 fi
 
-TS=(tailscale --socket=/run/tailscale/tailscaled.sock)
-FQDN_FILE=/data/tailscale/fqdn
 TLS_DIR=/data/tls
 TELEMETRY_SERVICE=/run/service/telemetry
 mkdir -p "${TLS_DIR}"
-
-# SHA-256 fingerprint of the first certificate in $1, or "" if unreadable.
-leaf_fingerprint() {
-  [ -s "$1" ] || return 0
-  openssl x509 -noout -fingerprint -sha256 -in "$1" 2>/dev/null || true
-}
 
 # The tailscale service writes the FQDN once the node is Running; on first
 # boot that can take a while, so wait for it instead of crash-looping.
@@ -159,6 +259,12 @@ while true; do
       else
         bashio::log.info "tlscert: certificate changed; telemetry service not up yet, it will load the new pair when it starts"
       fi
+    fi
+
+    if ! refresh_proxy_cert "${FQDN}"; then
+      bashio::log.error "tlscert: tailscale cert for the proxy (${FQDN}) failed; retrying in 10 minutes"
+      sleep 600
+      continue
     fi
   else
     rm -f "${TLS_DIR}/server.crt.tmp" "${TLS_DIR}/server.key.tmp"

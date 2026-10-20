@@ -34,6 +34,8 @@ const TELEMETRY_RETRY_MS = 30_000;
 const TELEMETRY_MAX_THROW_RETRIES = 5;
 const FORCE_FLUSH_AHEAD_MS = 2_500; // > Batcher's default maxAgeMs, well under maxBufferMs
 const MAX_PATCH_ATTEMPTS = 3; // consecutive mergeState failures before a pending patch is dropped
+// tesla-http-proxy's listener, served to the tailnet by garage-tailscale-publish.
+const PROXY_PORT = 4443;
 
 export type Logger = (level: LogLevel, msg: string, extra?: Record<string, unknown>) => void;
 
@@ -244,6 +246,64 @@ export function createTelemetryEnsurer(deps: TelemetryEnsurerDeps): TelemetryEns
   return {
     run: (mode) => attempt(mode, false),
     cancel: clearRetry,
+  };
+}
+
+export interface ProxyUrlPublisherDeps {
+  /** `options.tailscale_enabled`: false publishes `null` (no tailnet URL to reach the proxy at). */
+  tailscaleEnabled: boolean;
+  /** Throws while `/data/tailscale/fqdn` is not written yet (or is malformed). */
+  readFqdn: () => string;
+  sink: Pick<Sink, "setProxyBaseUrl">;
+  log: Logger;
+}
+
+export interface ProxyUrlPublisher {
+  /** Publishes the proxy URL if it changed since the last successful write. Never throws. */
+  onHeartbeat(): Promise<void>;
+}
+
+/**
+ * Keeps `vehicles.proxy_base_url` in step with the tailnet FQDN, so the app
+ * finds the command proxy (`https://<fqdn>:4443`) without configuration.
+ * Runs on every heartbeat but only writes when the value differs from the
+ * last one written successfully: once at start, and again if the node's
+ * FQDN changes. With tailscale disabled it writes `null` once. While the
+ * FQDN file is missing nothing is written (a stale URL is left alone); a
+ * failed write is logged and retried on the next heartbeat.
+ */
+export function createProxyUrlPublisher(deps: ProxyUrlPublisherDeps): ProxyUrlPublisher {
+  const { log } = deps;
+  // `undefined` = nothing written yet (distinct from a published `null`).
+  let published: string | null | undefined;
+  let inFlight = false;
+
+  function desiredUrl(): string | null | undefined {
+    if (!deps.tailscaleEnabled) return null;
+    try {
+      return `https://${deps.readFqdn()}:${PROXY_PORT}`;
+    } catch (err) {
+      log("debug", "proxy_base_url not published: tailnet FQDN not ready", { error: errMsg(err) });
+      return undefined;
+    }
+  }
+
+  return {
+    async onHeartbeat(): Promise<void> {
+      if (inFlight) return;
+      const url = desiredUrl();
+      if (url === undefined || url === published) return;
+      inFlight = true;
+      try {
+        await deps.sink.setProxyBaseUrl(url);
+        published = url;
+        log("info", "proxy_base_url published", { proxy_base_url: url });
+      } catch (err) {
+        log("warning", "proxy_base_url publish failed", { error: errMsg(err) });
+      } finally {
+        inFlight = false;
+      }
+    },
   };
 }
 
@@ -502,12 +562,20 @@ async function main(): Promise<void> {
     if (stopping) return;
     flushTick(false).catch((err) => log("error", "flush tick failed", { error: errMsg(err) }));
   }, FLUSH_INTERVAL_MS);
+  const proxyUrlPublisher = createProxyUrlPublisher({
+    tailscaleEnabled: options.tailscale_enabled,
+    readFqdn: () => readFqdn(),
+    sink,
+    log,
+  });
+
   heartbeatTimer = setInterval(() => {
     if (stopping) return;
     health.setDropped(activeRowBatcher.stats().dropped);
     sink
       .heartbeat(health.payload() as unknown as Record<string, unknown>)
       .catch((err) => log("error", "heartbeat failed", { error: errMsg(err) }));
+    void proxyUrlPublisher.onHeartbeat();
   }, HEARTBEAT_INTERVAL_MS);
   budgetTimer = setInterval(() => {
     if (stopping) return;

@@ -1,5 +1,5 @@
 name: "Garage Bridge"
-version: "0.2.0"
+version: "0.3.0"
 slug: "garage_bridge"
 description: "Tesla Fleet Telemetry receiver, command signing proxy and Supabase ingest for Garage"
 url: "https://github.com/duncanbottrill/garage"

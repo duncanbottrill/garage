@@ -32,6 +32,8 @@ export interface Sink {
   countSignals(n: number): Promise<void>;
   resolveVehicle(vin: string): Promise<ResolvedVehicle | null>;
   setTelemetryConfig(fields: TelemetryConfigFields): Promise<void>;
+  /** Writes `vehicles.proxy_base_url` (the tailnet URL of the command proxy), or clears it with `null`. */
+  setProxyBaseUrl(url: string | null): Promise<void>;
 }
 
 /**
@@ -114,6 +116,11 @@ export function SupabaseSink(client: SupabaseClient, initial: SupabaseSinkOption
     if (error) throw error;
   }
 
+  async function setProxyBaseUrl(url: string | null): Promise<void> {
+    const { error } = await client.from("vehicles").update({ proxy_base_url: url }).eq("id", vehicleId);
+    if (error) throw error;
+  }
+
   return {
     ensureStateRow,
     insertSignals,
@@ -123,6 +130,7 @@ export function SupabaseSink(client: SupabaseClient, initial: SupabaseSinkOption
     countSignals,
     resolveVehicle,
     setTelemetryConfig,
+    setProxyBaseUrl,
   };
 }
 
