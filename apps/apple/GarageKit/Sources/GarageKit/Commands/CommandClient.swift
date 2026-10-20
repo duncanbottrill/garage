@@ -20,6 +20,8 @@ import Synchronization
 ///   asks the user before calling ``wake(vin:)``.
 /// - A failed token fetch is published as ``tokenFailure`` (More's Connection row turns red) until a
 ///   later token fetch succeeds, whatever the proxy then answers. It is never a reason to sign out.
+/// - The proxy's second 401 (Tesla refused a freshly fetched token) is published as ``teslaRejected``
+///   until a later send goes through, so More offers "Reconnect Tesla" as the error copy says.
 /// - The caller cancelling a send gets `CancellationError`; once a send has timed out or been
 ///   cancelled, nothing more is posted for it, even if its token arrives later.
 @MainActor
@@ -34,6 +36,11 @@ public final class CommandClient {
     /// The last token failure a send ran into (`/api/token` refused the session, is renewing, or has no
     /// Tesla account); nil once a later send's token fetch works, even if the proxy then fails.
     public private(set) var tokenFailure: CommandError?
+
+    /// True after the proxy refused the Tesla token a second time (after one refresh): the token was
+    /// fetched fine, but Tesla no longer accepts it, so the owner has to reconnect Tesla. Cleared by
+    /// the next send that goes through.
+    public private(set) var teslaRejected = false
 
     /// The proxy's reachability, as last published by ``reachabilityMonitor``.
     public var reachability: ProxyReachability.State { reachabilityMonitor.state }
@@ -118,14 +125,22 @@ public final class CommandClient {
             if failure.marksConnection { tokenFailure = failure.error }
             throw failure.error
         } catch let error as CommandError {
+            if error == .unauthorized { teslaRejected = true }
             throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             throw CommandError.rejected(reason: "Unexpected error: \(error.localizedDescription)")
         }
+        teslaRejected = false
         usage.record(kind == .wake ? .wakes : .commands)
         return true
+    }
+
+    /// Sends the usage counts waiting for their batching window now. Call when the app goes to the
+    /// background, so a command sent just before suspension is still counted.
+    public func flushUsage() {
+        usage.flush()
     }
 
     private static func encode(_ body: [String: AnyCodable]) throws -> Data {

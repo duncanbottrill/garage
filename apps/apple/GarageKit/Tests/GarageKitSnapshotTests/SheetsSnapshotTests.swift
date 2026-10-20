@@ -5,8 +5,8 @@ import Testing
 @testable import GarageKit
 
 /// The Climate and Charge sheets as standalone views (not inside a system sheet) at 402 × 560 on the
-/// iPhone 17 Pro dark traits, over the app background, in their idle, pending, charging and
-/// scheduled states.
+/// iPhone 17 Pro dark traits, over the app background, in their idle, pending, unreachable, charging
+/// and scheduled states.
 @MainActor @Suite struct SheetsSnapshotTests {
     /// 2026-10-20 14:30:00 UTC.
     private static let now = Date(timeIntervalSince1970: 1_792_506_600)
@@ -77,6 +77,16 @@ import Testing
         #expect(await until { !model.targetPending })
     }
 
+    /// The bridge's proxy can't be reached (Tailscale off): the controls are disabled with the
+    /// Tailscale line (spec §12).
+    @Test func climate_unreachable() {
+        let car = SnapshotCar()
+        let model = ClimateModel(send: car.send, wake: car.wake, locale: Self.uk)
+        model.state = row { $0.hvacOn = false }
+        model.reachability = .unreachable
+        check(ClimateSheet(model: model))
+    }
+
     // MARK: Charge
 
     @Test func charge_charging() {
@@ -104,6 +114,30 @@ import Testing
         }
         model.reachability = .reachable
         check(ChargeSheet(model: model))
+    }
+
+    /// Plugged in and not charging: Start and a new 80 % limit on their way to the car (spec §12).
+    @Test func charge_pending() async {
+        let car = SnapshotCar()
+        let model = ChargeModel(send: car.send, wake: car.wake, now: { Self.now }, timeZone: Self.utc, debounce: .milliseconds(1))
+        model.state = row {
+            $0.soc = 54
+            $0.chargeState = "Stopped"
+            $0.chargePortOpen = true
+            $0.chargeLimitSoc = 90
+        }
+        model.reachability = .reachable
+
+        car.holding = true
+        let start = Task { await model.toggleCharging() }
+        model.setChargeLimit(80)
+        model.commitChargeLimit()
+        #expect(await until { model.chargingPending && model.limitPending && car.heldCount == 2 })
+        check(ChargeSheet(model: model))
+
+        car.release()
+        await start.value
+        #expect(await until { !model.limitPending })
     }
 
     private func until(_ condition: () -> Bool) async -> Bool {

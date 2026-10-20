@@ -43,6 +43,32 @@ import Testing
         #expect(car.wakes == 1)
     }
 
+    /// While a control sheet covers Status, Status's prompt cannot be seen: a Status command that
+    /// needs a wake is declined at once instead of waiting on it, and one already waiting is declined.
+    @Test func coveredHostDeclinesInsteadOfAsking() async {
+        let car = FakeCar()
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+
+        let waiting = Task { await runner.run(.flashLights) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.isCovered = true
+        #expect(await waiting.value == .declined)
+        #expect(!runner.isAskingToWake)
+
+        clock.advance(5) // past the decline window: only the cover declines now
+        #expect(await runner.run(.honkHorn) == .declined)
+        #expect(!runner.isAskingToWake)
+        #expect(car.wakes == 0)
+        #expect(car.sent.isEmpty)
+
+        runner.isCovered = false
+        let later = Task { await runner.run(.honkHorn) }
+        #expect(await eventually { runner.isAskingToWake }, "uncovered: the prompt asks again")
+        runner.confirmWake()
+        #expect(await later.value == .sent)
+    }
+
     /// An asleep answer inside the grace is "still waking": no prompt and no second wake.
     @Test func asleepErrorInsideGraceIsStillWaking() async {
         let car = FakeCar()

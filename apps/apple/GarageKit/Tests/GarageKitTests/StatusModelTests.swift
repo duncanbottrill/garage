@@ -141,6 +141,10 @@ import Testing
         #expect(captions.freshnessCaption(.charge) == "Stale · 14:02")
         #expect(captions.freshnessCaption(.location) == "—")
         #expect(captions.fieldFreshness(.climate) == .live)
+
+        // Older than a day: the date too, so yesterday's 14:02 does not read as today's.
+        state.chargeAt = now.addingTimeInterval(-(24 * 3600 + 28 * 60))
+        #expect(model(state).freshnessCaption(.charge) == "Stale · 19 Oct 14:02")
     }
 }
 

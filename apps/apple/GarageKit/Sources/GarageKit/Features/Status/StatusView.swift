@@ -107,6 +107,9 @@ public struct StatusView: View {
             .modifier(WakePromptHost(runner: runner))
             .autoDismissingToast(runner)
             .sheet(item: $presentedSheet) { controlSheet($0) }
+            // A sheet over Status hides Status's wake prompt: its commands that need a wake are
+            // declined rather than left waiting for a prompt nobody can see.
+            .onChange(of: presentedSheet, initial: true) { runner.isCovered = presentedSheet != nil }
     }
 
     @ViewBuilder

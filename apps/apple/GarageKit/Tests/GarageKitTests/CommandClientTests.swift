@@ -14,7 +14,9 @@ private struct Rig {
     nonisolated static let vin = "VIN"
     nonisolated static let ok = StubReply.json(200, #"{"response":{"result":true,"reason":""}}"#)
 
-    init(timeout: Duration = .seconds(10), usageAttempts: Int = 3) {
+    /// `usageInterval` and `usageCoalesce` are short by default so usage tests do not wait out the
+    /// production window.
+    init(timeout: Duration = .seconds(10), usageAttempts: Int = 3, usageInterval: Duration = .milliseconds(50), usageCoalesce: Duration = .zero) {
         let api = GarageAPI(baseURL: backend.baseURL(), session: backend.session, supabaseToken: { "sb-jwt" })
         let issued = Mutex(0)
         backend.on("GET", "/api/token") { _ in
@@ -22,7 +24,7 @@ private struct Rig {
             return .json(200, #"{"access_token":"tesla-\#(n)","expires_at":"2099-01-01T00:00:00Z"}"#)
         }
         backend.on("POST", "/api/usage") { _ in .json(200, #"{"ok":true}"#) }
-        usage = UsageReporter(attempts: usageAttempts, retryDelay: .milliseconds(10)) { category, count in
+        usage = UsageReporter(attempts: usageAttempts, retryDelay: .milliseconds(10), interval: usageInterval, coalesce: usageCoalesce) { category, count in
             try await api.reportUsage(category, count: count)
         }
         let proxyURL = proxy.baseURL(port: 4443)
@@ -82,6 +84,29 @@ private struct Rig {
         #expect(rig.backend.requests("GET", "/api/token").count == 3)
         // Only the successful command was counted.
         #expect(await rig.usageBodies() == [["category": "commands", "count": 1]])
+    }
+
+    /// The proxy refusing the token twice (Tesla rejected it after a refresh) is published as
+    /// `teslaRejected`, apart from token-fetch failures, until a later send goes through.
+    @Test func secondUnauthorizedMarksTeslaRejected() async throws {
+        let rig = Rig()
+        let unauthorized = StubReply.json(401, #"{"response":null,"error":"invalid bearer token"}"#)
+        #expect(!rig.client.teslaRejected)
+
+        rig.onCommand("door_lock", unauthorized, unauthorized)
+        await #expect(throws: CommandError.unauthorized) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        #expect(rig.client.teslaRejected)
+        #expect(rig.client.tokenFailure == nil, "the token fetch worked; Tesla refused it")
+
+        // A failure for another reason leaves the mark.
+        rig.onCommand("door_unlock", .json(200, #"{"response":{"result":false,"reason":"is_driving"}}"#))
+        await #expect(throws: CommandError.rejected(reason: "is_driving")) { try await rig.client.send(.doorUnlock, vin: Rig.vin) }
+        #expect(rig.client.teslaRejected)
+
+        // The next send that goes through clears it.
+        rig.onCommand("door_lock", Rig.ok)
+        try await rig.client.send(.doorLock, vin: Rig.vin)
+        #expect(!rig.client.teslaRejected)
     }
 
     @Test func ignoresDuplicateTapWhileInFlight() async throws {
@@ -242,6 +267,18 @@ private struct Rig {
         let usage = try #require(rig.backend.requests("POST", "/api/usage").first)
         #expect(String(decoding: usage.body, as: UTF8.self) == #"{"category":"commands","count":1}"#)
         #expect(usage.bearer == "Bearer sb-jwt")
+    }
+
+    /// Twelve commands inside a second, on the production window: one usage report of 12, so a busy
+    /// minute stays inside `/api/usage`'s 10 requests a minute.
+    @Test func burstOfCommandsIsOneUsageReport() async throws {
+        let rig = Rig(usageInterval: UsageReporter.defaultInterval, usageCoalesce: UsageReporter.defaultCoalesce)
+        rig.onCommand("door_lock", Rig.ok)
+        let start = ContinuousClock.now
+        for _ in 0..<12 { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        #expect(ContinuousClock.now - start < .seconds(1))
+
+        #expect(await rig.usageBodies() == [["category": "commands", "count": 12]])
     }
 
     @Test func usageFailureIsNotSurfaced() async throws {

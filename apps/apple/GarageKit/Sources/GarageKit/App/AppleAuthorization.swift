@@ -73,17 +73,40 @@ enum AppleCredential {
     }
 }
 
+/// The window one authentication sheet attaches to, captured when that call starts.
+///
+/// Each call gets its own provider, so a later call can neither swap the window an earlier sheet asks
+/// for nor clear it from under it. Both sessions hold their provider weakly: the caller keeps it alive.
+@MainActor
+final class PresentationAnchorProvider: NSObject, ASAuthorizationControllerPresentationContextProviding, ASWebAuthenticationPresentationContextProviding {
+    let anchor: ASPresentationAnchor
+
+    init(anchor: ASPresentationAnchor) {
+        self.anchor = anchor
+    }
+
+    func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+        anchor
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        anchor
+    }
+}
+
 /// Runs Sign in with Apple without a button (for "Link Apple ID") and returns the ID token.
 @MainActor
-final class AppleAuthorizer: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+final class AppleAuthorizer: NSObject, ASAuthorizationControllerDelegate {
     private var continuation: CheckedContinuation<ASAuthorization, any Error>?
     private var controller: ASAuthorizationController?
-    private var anchor: ASPresentationAnchor?
+    /// The current request's anchor; kept because the controller holds it weakly.
+    private var provider: PresentationAnchorProvider?
 
     /// Shows the Apple sheet and waits for the user. Throws `ASAuthorizationError` (`.canceled` when
-    /// dismissed), or `ASWebAuthenticationSessionError(.presentationContextInvalid)` with no window to show it on.
+    /// dismissed, or when a newer call replaces this one), or
+    /// `ASWebAuthenticationSessionError(.presentationContextInvalid)` with no window to show it on.
     func idToken(nonce: AppleNonce) async throws -> String {
-        anchor = try PresentationAnchor.current()
+        let provider = PresentationAnchorProvider(anchor: try PresentationAnchor.current())
         let request = ASAuthorizationAppleIDProvider().createRequest()
         AppleCredential.prepare(request, nonce: nonce)
         let authorization = try await withCheckedThrowingContinuation { continuation in
@@ -91,29 +114,28 @@ final class AppleAuthorizer: NSObject, ASAuthorizationControllerDelegate, ASAuth
             self.continuation = continuation
             let controller = ASAuthorizationController(authorizationRequests: [request])
             controller.delegate = self
-            controller.presentationContextProvider = self
+            controller.presentationContextProvider = provider
             self.controller = controller
+            self.provider = provider
             controller.performRequests()
         }
         return try AppleCredential.idToken(from: authorization)
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-        finish(.success(authorization))
+        finish(controller, .success(authorization))
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: any Error) {
-        finish(.failure(error))
+        finish(controller, .failure(error))
     }
 
-    func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-        // Set (or the call threw) before `performRequests()`, and only that request calls back here.
-        anchor!
-    }
-
-    private func finish(_ result: Result<ASAuthorization, any Error>) {
+    /// Settles the call `source` belongs to. A superseded request (its continuation was already
+    /// cancelled) leaves the newer one alone.
+    private func finish(_ source: ASAuthorizationController, _ result: Result<ASAuthorization, any Error>) {
+        guard source === controller else { return }
         controller = nil
-        anchor = nil
+        provider = nil
         let continuation = continuation
         self.continuation = nil
         continuation?.resume(with: result)
@@ -122,9 +144,10 @@ final class AppleAuthorizer: NSObject, ASAuthorizationControllerDelegate, ASAuth
 
 /// Opens a URL in `ASWebAuthenticationSession` (the Tesla sign-in) and returns the callback URL.
 @MainActor
-final class WebAuthenticator: NSObject, ASWebAuthenticationPresentationContextProviding {
+final class WebAuthenticator: NSObject {
     private var session: ASWebAuthenticationSession?
-    private var anchor: ASPresentationAnchor?
+    /// Identifies ``session``, so a finished older session's clean-up cannot clear a newer one.
+    private var sessionID: UUID?
 
     /// Shows `url` in the system browser sheet, sharing Safari's cookies (`prefersEphemeralWebBrowserSession`
     /// is false, so a saved Tesla login is reused), and returns when it redirects to `callbackURLScheme`.
@@ -132,32 +155,33 @@ final class WebAuthenticator: NSObject, ASWebAuthenticationPresentationContextPr
     /// `.presentationContextInvalid` when there is no window to show it on).
     func authenticate(url: URL, callbackURLScheme: String) async throws -> URL {
         session?.cancel()
-        anchor = try PresentationAnchor.current()
+        let provider = PresentationAnchorProvider(anchor: try PresentationAnchor.current())
+        let id = UUID()
         return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(url: url, callbackURLScheme: callbackURLScheme) { [weak self] callback, error in
+                // The session holds its provider weakly; this closure keeps it until the sheet is done.
+                withExtendedLifetime(provider) {}
                 if let callback {
                     continuation.resume(returning: callback)
                 } else {
                     continuation.resume(throwing: error ?? ASWebAuthenticationSessionError(.canceledLogin))
                 }
                 Task { @MainActor in
-                    self?.session = nil
-                    self?.anchor = nil
+                    guard let self, self.sessionID == id else { return }
+                    self.session = nil
+                    self.sessionID = nil
                 }
             }
             session.prefersEphemeralWebBrowserSession = false
-            session.presentationContextProvider = self
+            session.presentationContextProvider = provider
             self.session = session
+            sessionID = id
             if !session.start() {
                 self.session = nil
+                sessionID = nil
                 continuation.resume(throwing: ASWebAuthenticationSessionError(.presentationContextInvalid))
             }
         }
-    }
-
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        // Set (or the call threw) before `start()`, and only that session calls back here.
-        anchor!
     }
 
     /// Whether `error` is the user closing the browser sheet.

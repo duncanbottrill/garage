@@ -42,6 +42,9 @@ public final class AppModel {
     @ObservationIgnored private var pendingNonce: AppleNonce?
     @ObservationIgnored private var authTask: Task<Void, Never>?
     @ObservationIgnored private var reachabilityRunning = false
+    /// Set when the onboarding vehicle check re-read the rows during the current ``refresh()``, so the
+    /// foreground re-read is not done twice.
+    @ObservationIgnored private var refetchedDuringEvaluation = false
     /// Backs ``moreModel``.
     @ObservationIgnored private var more: MoreModel?
     /// Ends the Supabase session on this device (`signOut(scope: .local)`); injectable for tests.
@@ -148,7 +151,9 @@ public final class AppModel {
             },
             defaults: defaults,
             // Read live, so the Connection row turns red as soon as a send's token fetch fails.
-            tokenFailure: { [weak self] in self?.commandClient.tokenFailure }
+            tokenFailure: { [weak self] in self?.commandClient.tokenFailure },
+            // And offers "Reconnect Tesla" as soon as Tesla refuses the token after a refresh.
+            teslaRejected: { [weak self] in self?.commandClient.teslaRejected ?? false }
         )
         more.onProxyOverrideChange = { [weak self] in self?.proxyOverrideChanged() }
         // The billed read's answer is the newest row there is: show it without waiting for Realtime.
@@ -173,18 +178,27 @@ public final class AppModel {
     /// Re-runs the onboarding checks, then, on Status, starts the proxy probe loop and the vehicle
     /// store if it is not following the car yet (the launch check ran offline, so nothing started it).
     /// The store needs only Supabase, so it is started even when a Garage backend check failed.
+    ///
+    /// When the store is already following the car (the app is back in the foreground), the vehicle and
+    /// its `vehicle_state` row are re-read over PostgREST (free): Realtime may have missed updates while
+    /// the app was suspended, and the channel can take a while to notice.
     public func refresh() async {
+        refetchedDuringEvaluation = false
         await flow.evaluate()
         startMonitoringIfDone()
-        if flow.step == .done, !vehicleStore.isStarted {
+        guard flow.step == .done else { return }
+        if !vehicleStore.isStarted {
             await vehicleStore.start()
+        } else if !refetchedDuringEvaluation {
+            await vehicleStore.refetch()
         }
     }
 
     /// Call when the app goes to the background: writes the snapshot the store is holding back, so the
-    /// next cold start opens on the newest row.
+    /// next cold start opens on the newest row, and sends the usage counts waiting for their window.
     public func didEnterBackground() {
         vehicleStore.flushCache()
+        commandClient.flushUsage()
     }
 
     /// Handles a URL opened by the app (`onOpenURL`). `garage://connected` re-evaluates onboarding.
@@ -392,20 +406,45 @@ public final class AppModel {
             },
             vehicle: {
                 guard let model = owner.model else { return nil }
-                if let vehicle = model.vehicleStore.vehicle { return vehicle }
-                // A throwing fetch first: the store swallows errors, and a network failure must not
-                // read as "no vehicle".
                 let defaultsBox = UncheckedDefaults(model.defaults)
                 let fetcher = SupabaseRowFetcher(client: model.client) { VehicleSelection.current(in: defaultsBox.defaults) }
-                guard let found = try await fetcher.fetchVehicle() else { return nil }
-                await model.vehicleStore.start()
-                return model.vehicleStore.vehicle ?? found
+                let found = try await onboardingVehicle(store: model.vehicleStore, proxyState: model.flow.proxyState) {
+                    try await fetcher.fetchVehicle()
+                }
+                if found.refetched { model.refetchedDuringEvaluation = true }
+                return found.vehicle
             },
             proxyReachability: {
                 guard let model = owner.model else { return .unknown }
                 return await model.commandClient.reachabilityMonitor.check()
             }
         )
+    }
+
+    /// Onboarding's vehicle check (steps 3 and 4).
+    ///
+    /// - No car in memory: `fetch` decides (it throws, so a network failure never reads as "no
+    ///   vehicle"), and a car found starts `store`.
+    /// - A car in memory whose proxy URL is missing, or whose probe has not answered (`proxyState` is
+    ///   `.unknown`): the vehicles row is read again (PostgREST, free), since the bridge may have
+    ///   published its URL after launch and `vehicles` is not in Realtime. This is what lets the
+    ///   Tailscale step's "Check again" advance without a relaunch.
+    /// - Otherwise the car in memory, with no read.
+    ///
+    /// - Returns: The car, and whether the rows were re-read.
+    static func onboardingVehicle(
+        store: VehicleStore,
+        proxyState: ProxyReachability.State,
+        fetch: @MainActor () async throws -> Vehicle?
+    ) async throws -> (vehicle: Vehicle?, refetched: Bool) {
+        if let vehicle = store.vehicle {
+            guard vehicle.proxyBaseURL == nil || proxyState == .unknown else { return (vehicle, false) }
+            if store.isStarted { await store.refetch() } else { await store.start() }
+            return (store.vehicle ?? vehicle, true)
+        }
+        guard let found = try await fetch() else { return (nil, false) }
+        await store.start()
+        return (store.vehicle ?? found, false)
     }
 
     static func hasAppleIdentity(_ user: User?) -> Bool {

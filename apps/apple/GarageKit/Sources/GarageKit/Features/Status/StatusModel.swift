@@ -193,7 +193,8 @@ public struct StatusModel: Sendable, Equatable {
         Freshness.of(stamp(field), now: now)
     }
 
-    /// "now" (live), "2 min ago" (aging), "Stale · 14:02" (stale), or "—" (never reported).
+    /// "now" (live), "2 min ago" (aging), "Stale · 14:02" (stale; "Stale · 19 Oct 14:02" when more
+    /// than a day old or on an earlier day), or "—" (never reported).
     public func freshnessCaption(_ field: Field) -> String {
         switch fieldFreshness(field) {
         case .live:
@@ -201,7 +202,7 @@ public struct StatusModel: Sendable, Equatable {
         case let .aging(age):
             "\(max(1, Int(age / 60))) min ago"
         case .stale:
-            stamp(field).map { "Stale · \(CommandError.clockTime($0, timeZone: timeZone))" } ?? Self.placeholder
+            stamp(field).map { "Stale · \(TimeText.stamp($0, now: now, timeZone: timeZone))" } ?? Self.placeholder
         case .unknown:
             Self.placeholder
         }

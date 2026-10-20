@@ -200,6 +200,22 @@ public final class VehicleStore {
         subscribe(vehicleID: vehicle.id, generation: mine)
     }
 
+    /// Re-reads the vehicle and its `vehicle_state` row over PostgREST (free) without touching the
+    /// channel: for the app coming back to the foreground, when Realtime may have missed updates while
+    /// it was suspended, and for onboarding waiting on a newly published proxy URL.
+    ///
+    /// Does nothing unless started. A ``stop()`` or ``start()`` meanwhile wins (nothing is written), a
+    /// row older than the current one is ignored, and a vehicle row for another car is not adopted.
+    public func refetch() async {
+        guard isStarted, let id = vehicle?.id else { return }
+        let mine = generation
+        let fetchedVehicle = await loadVehicle()
+        let fetchedState = await loadState(vehicleID: id)
+        guard generation == mine else { return }
+        if let fetchedVehicle, fetchedVehicle.id == id { vehicle = fetchedVehicle }
+        adoptFetched(fetchedState)
+    }
+
     /// Stops following Realtime and abandons any `start()` still fetching. The current state stays on
     /// screen, and a Realtime row still waiting for the cache is written now.
     public func stop() {

@@ -4,7 +4,8 @@ import SwiftUI
 import Testing
 @testable import GarageKit
 
-/// The More screen on iPhone 17 Pro, dark: everything healthy, and the Tesla token rotation failing.
+/// The More screen on iPhone 17 Pro, dark: everything healthy, the Tesla token rotation failing, and
+/// the bridge offline.
 /// Rendered taller than the screen so every group is in the image.
 @MainActor @Suite struct MoreSnapshotTests {
     /// 2026-10-20 14:30:00 UTC.
@@ -51,15 +52,29 @@ import Testing
         check(more)
     }
 
+    /// The bridge stopped checking in 20 min ago (red Bridge row) and telemetry is as old, so
+    /// "Refresh now" is offered (spec §12).
+    @Test func more_bridgeOffline() async {
+        let more = await Self.model(
+            health: ConnectionHealth(connected: true, rotatedAt: Self.now.addingTimeInterval(-30 * 60)),
+            telemetryAge: 20 * 60,
+            bridgeAge: 20 * 60
+        )
+        #expect(more.row(.refresh) != nil)
+        #expect(more.row(.bridge)?.tone == .failed)
+        check(more)
+    }
+
     /// A More model on fixed data, with the connection health already loaded.
-    static func model(health: ConnectionHealth, telemetryAge: TimeInterval = 20, appleLinked: Bool = true) async -> MoreModel {
+    static func model(health: ConnectionHealth, telemetryAge: TimeInterval = 20, bridgeAge: TimeInterval = 10, appleLinked: Bool = true) async -> MoreModel {
         let now = now
         let more = MoreModel(
             api: MoreModel.API(connection: { health }, refreshVehicleData: { _ in VehicleState() }),
             probe: { _ in .reachable },
             defaults: UserDefaults(suiteName: "MoreSnapshotTests-\(UUID().uuidString)")!,
             now: { now },
-            appVersion: MoreModel.AppVersion(version: "0.1.0", build: "1")
+            appVersion: MoreModel.AppVersion(version: "0.1.0", build: "1"),
+            timeZone: TimeZone(identifier: "UTC")!
         )
         more.vehicle = Vehicle(
             id: UUID(uuidString: "7C1F0A0E-8A43-4D43-9A39-2F1B6F5D1E11")!,
@@ -74,7 +89,7 @@ import Testing
         state.climateAt = stamp
         state.locationAt = stamp
         state.bodyAt = stamp
-        state.bridgeSeenAt = now.addingTimeInterval(-10)
+        state.bridgeSeenAt = now.addingTimeInterval(-bridgeAge)
         state.bridgeHealth = BridgeHealth(dropped: 0, connectivity: "CONNECTED", patchFailures: 0)
         more.state = state
         more.reachability = .reachable

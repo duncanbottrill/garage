@@ -15,7 +15,8 @@ import Observation
 /// - **Cancel means no.** It declines every command waiting on the prompt and every command queued
 ///   behind one, and for ``declineWindow`` any further command that would need a wake is declined
 ///   without asking (so a coalesced follow-up cannot raise the prompt again).
-/// - A command that needs a wake while no ``WakePrompt`` is on screen is declined, never woken.
+/// - A command that needs a wake while no ``WakePrompt`` is on screen, or while another surface covers
+///   it (``isCovered``: a control sheet over Status), is declined, never woken.
 /// - **One command per wire name at a time.** ``CommandClient`` drops a second send of a name that
 ///   is in flight, so `run` queues it behind the first instead (seat heaters share one name).
 /// - Errors other than asleep put their ``CommandError`` copy in ``toast``.
@@ -73,6 +74,13 @@ public final class CommandRunner {
     /// Whether a ``WakePrompt`` is on screen to ask. Without one, a command that needs a wake is
     /// declined at once rather than left waiting for a prompt nobody can see.
     var hostsPrompt = false
+
+    /// Whether another surface covers this runner's prompt (a Climate or Charge sheet over Status), so
+    /// the prompt cannot be seen: commands that need a wake are declined instead of waiting on it, and
+    /// covering declines any already waiting.
+    var isCovered = false {
+        didSet { if isCovered, !oldValue { cancelWake() } }
+    }
 
     /// Whether the car is asleep, per its row. Set by the owner after init.
     @ObservationIgnored var isAsleep: @MainActor () -> Bool = { false }
@@ -218,7 +226,7 @@ public final class CommandRunner {
         if let wakeTask {
             task = wakeTask
         } else {
-            guard hostsPrompt, !recentlyDeclined else { return .declined }
+            guard hostsPrompt, !isCovered, !recentlyDeclined else { return .declined }
             task = await withCheckedContinuation { continuation in
                 promptWaiters.append(continuation)
                 isAskingToWake = true

@@ -30,6 +30,7 @@ private final class FakeBackend {
 @MainActor @Suite struct MoreModelTests {
     /// 2026-10-20 14:30:00 UTC.
     private static let now = Date(timeIntervalSince1970: 1_792_506_600)
+    private static let utc = TimeZone(identifier: "UTC")!
     private let published = URL(string: "https://garage-bridge.tail068c8f.ts.net:4443")!
     private let vehicle: Vehicle
 
@@ -50,7 +51,8 @@ private final class FakeBackend {
                 return backend.probeResult
             },
             defaults: defaults,
-            now: { Self.now }
+            now: { Self.now },
+            timeZone: Self.utc
         )
         model.vehicle = vehicle
         return model
@@ -76,7 +78,7 @@ private final class FakeBackend {
         await model.loadConnection()
         let healthy = try #require(model.row(.connection))
         #expect(healthy.tone == .healthy)
-        #expect(healthy.detail == "Connected · token rotated 2 h ago")
+        #expect(healthy.detail == "Connected · token rotated at 12:30")
         #expect(!model.showsReconnect)
 
         backend.health = ConnectionHealth(
@@ -211,6 +213,13 @@ extension MoreModelTests {
     }
 }
 
+/// A value a closure reads live while the test changes it.
+@MainActor
+private final class Box<Value> {
+    var value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 /// A private, empty defaults domain per test.
 private func freshDefaults() -> UserDefaults {
     UserDefaults(suiteName: "MoreModelTests-\(UUID().uuidString)")!
@@ -260,6 +269,24 @@ extension MoreModelTests {
         #expect(model.row(.bridge)?.tone == .warning)
     }
 
+    /// Copy rule: relative times only under an hour; a clock time after that, with the date once it
+    /// is more than a day old (or on an earlier day, so yesterday's 15:00 never reads as today's).
+    @Test func timesAreRelativeOnlyUnderAnHour() {
+        let at = { (seconds: TimeInterval) in MoreModel.when(Self.now.addingTimeInterval(-seconds), now: Self.now, timeZone: Self.utc) }
+        #expect(at(20) == "just now")
+        #expect(at(4 * 60) == "4 min ago")
+        #expect(at(59 * 60 + 59) == "59 min ago")
+        #expect(at(3600) == "at 13:30")
+        #expect(at(2 * 3600 + 28 * 60) == "at 12:02")
+        #expect(at(14 * 3600 + 30 * 60) == "at 00:00")
+        #expect(at(14 * 3600 + 31 * 60) == "19 Oct 23:59", "yesterday, though under a day ago")
+        #expect(at(24 * 3600 + 28 * 60) == "19 Oct 14:02")
+
+        let model = makeModel(FakeBackend())
+        model.state = heartbeat(2 * 3600, dropped: 0, failures: 0)
+        #expect(model.row(.bridge)?.detail.hasPrefix("Seen at 12:30") == true)
+    }
+
     /// "Refresh now" hands its row to the store.
     @Test func refreshNowMergesIntoStore() async {
         let backend = FakeBackend()
@@ -276,6 +303,29 @@ extension MoreModelTests {
         backend.refreshError = APIError.asleep
         await model.refreshNow()
         #expect(merged.count == 1, "a failed refresh merges nothing")
+    }
+
+    /// Tesla refusing the token after a refresh (the proxy's second 401) offers "Reconnect Tesla" and
+    /// turns the Connection row red, although the token fetch itself worked.
+    @Test func teslaRejectionOffersReconnect() async {
+        let backend = FakeBackend()
+        let client = Box(false)
+        let model = MoreModel(
+            api: backend.api, probe: { _ in .reachable }, defaults: freshDefaults(), now: { Self.now },
+            tokenFailure: { nil }, teslaRejected: { client.value }
+        )
+        await model.loadConnection()
+        #expect(!model.showsReconnect)
+        #expect(model.row(.connection)?.tone == .healthy)
+
+        client.value = true
+        #expect(model.showsReconnect)
+        #expect(model.row(.connection)?.tone == .failed)
+        #expect(model.row(.connection)?.detail == MoreModel.teslaRejectedDetail)
+
+        client.value = false
+        #expect(!model.showsReconnect)
+        #expect(model.row(.connection)?.tone == .healthy)
     }
 
     /// A token failure turns the Connection row red even when `/api/connection` says connected.

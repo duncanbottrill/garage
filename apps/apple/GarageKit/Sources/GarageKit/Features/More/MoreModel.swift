@@ -217,6 +217,8 @@ public final class MoreModel {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let tokenFailure: @MainActor () -> CommandError?
+    @ObservationIgnored private let teslaRejected: @MainActor () -> Bool
+    @ObservationIgnored private let timeZone: TimeZone
     /// Bumped on every override change, so ``effectiveProxyURL`` (read from defaults) is observed.
     private var overrideRevision = 0
     /// The bridge's last heartbeat seen in this session: check-in time and counters.
@@ -234,17 +236,22 @@ public final class MoreModel {
     ///   - api: The connection and refresh calls.
     ///   - probe: One reachability probe of a proxy URL (a TLS handshake, nothing billed).
     ///   - defaults: Where the proxy override lives (``ProxyOverride/key``).
-    ///   - now: The clock for "rotated 2 h ago", the bridge window and the refresh rule.
+    ///   - now: The clock for "rotated 4 min ago", the bridge window and the refresh rule.
     ///   - appVersion: The version shown in About.
     ///   - tokenFailure: The command client's last token failure (``CommandClient/tokenFailure``),
     ///     read whenever the rows are; it turns the Connection row red.
+    ///   - teslaRejected: Whether Tesla refused the token after a refresh
+    ///     (``CommandClient/teslaRejected``), read whenever the rows are; it offers "Reconnect Tesla".
+    ///   - timeZone: For clock times ("rotated at 14:02").
     public init(
         api: API,
         probe: @escaping @MainActor (URL) async -> ProxyReachability.State,
         defaults: UserDefaults = .standard,
         now: @escaping @MainActor () -> Date = { Date() },
         appVersion: AppVersion = .main,
-        tokenFailure: @escaping @MainActor () -> CommandError? = { nil }
+        tokenFailure: @escaping @MainActor () -> CommandError? = { nil },
+        teslaRejected: @escaping @MainActor () -> Bool = { false },
+        timeZone: TimeZone = .current
     ) {
         self.api = api
         self.probe = probe
@@ -252,6 +259,8 @@ public final class MoreModel {
         self.now = now
         self.appVersion = appVersion
         self.tokenFailure = tokenFailure
+        self.teslaRejected = teslaRejected
+        self.timeZone = timeZone
     }
 
     // MARK: Connection
@@ -266,13 +275,17 @@ public final class MoreModel {
         }
     }
 
-    /// Offer "Reconnect Tesla": the last rotation failed, or no Tesla account is connected (per
-    /// `/api/connection`, or because a send found no Tesla token).
+    /// Offer "Reconnect Tesla": the last rotation failed, no Tesla account is connected (per
+    /// `/api/connection`, or because a send found no Tesla token), or Tesla refused the token after a
+    /// refresh (the proxy's second 401).
     public var showsReconnect: Bool {
-        if tokenFailure() == .unauthorized { return true }
+        if tokenFailure() == .unauthorized || teslaRejected() { return true }
         guard let connection else { return false }
         return !connection.connected || connection.lastError != nil
     }
+
+    /// The Connection row's detail after Tesla refused the token (``CommandClient/teslaRejected``).
+    public static let teslaRejectedDetail = "Tesla refused Garage's token · reconnect Tesla"
 
     /// The Connection row's detail for a token failure.
     public static func tokenFailureDetail(_ failure: CommandError) -> String {
@@ -411,12 +424,13 @@ public final class MoreModel {
         if connection?.connected == false { return make("Not connected to Tesla", .failed) }
         // A send could not get a Tesla token: red, whatever the last health check said.
         if let failure = tokenFailure() { return make(Self.tokenFailureDetail(failure), .failed) }
+        if teslaRejected() { return make(Self.teslaRejectedDetail, .failed) }
         guard let connection else {
             return connectionError.map { make($0, .warning) } ?? make("Checking…", .neutral)
         }
         if connection.rotating { return make("Connected · rotating token", .healthy) }
         guard let rotated = connection.rotatedAt else { return make("Connected", .healthy) }
-        return make("Connected · token rotated \(Self.ago(rotated, now: at))", .healthy)
+        return make("Connected · token rotated \(Self.when(rotated, now: at, timeZone: timeZone))", .healthy)
     }
 
     private func bridgeRow(_ at: Date) -> Row {
@@ -425,7 +439,7 @@ public final class MoreModel {
         }
         guard let seen = state?.bridgeSeenAt else { return make("No check-in yet", .neutral) }
         let health = state?.bridgeHealth
-        var parts = ["Seen \(Self.ago(seen, now: at))"]
+        var parts = ["Seen \(Self.when(seen, now: at, timeZone: timeZone))"]
         if let connectivity = health?.connectivity, !connectivity.isEmpty {
             parts.append(connectivity.replacingOccurrences(of: "_", with: " ").lowercased().capitalizedFirst)
         }
@@ -469,7 +483,7 @@ public final class MoreModel {
         let (detail, tone): (String, Row.Tone) = switch refreshPhase {
         case .idle: ("One read from the car, counted in the budget", .neutral)
         case .refreshing: ("Refreshing…", .neutral)
-        case let .succeeded(date): ("Requested \(Self.ago(date, now: at))", .healthy)
+        case let .succeeded(date): ("Requested \(Self.when(date, now: at, timeZone: timeZone))", .healthy)
         case let .failed(message): (message, .failed)
         }
         return Row(id: .refresh, icon: .refreshCw, title: "Refresh now", detail: detail, tone: tone)
@@ -492,7 +506,7 @@ public final class MoreModel {
     private var tailscaleRow: Row {
         let (detail, tone): (String, Row.Tone) = switch reachability {
         case .reachable: ("Bridge reachable over the tailnet", .healthy)
-        case .unreachable: (StatusModel.message(for: .tailscaleOff, timeZone: .current), .failed)
+        case .unreachable: (StatusModel.message(for: .tailscaleOff, timeZone: timeZone), .failed)
         case .unknown: ("Not checked yet", .neutral)
         }
         return Row(id: .tailscale, icon: .network, title: "Tailscale", detail: detail, tone: tone)
@@ -508,14 +522,16 @@ public final class MoreModel {
         Row(id: .about, icon: .info, title: "Garage", detail: "Version \(appVersion.text)", tone: .neutral)
     }
 
-    /// "just now", "4 min ago", "2 h ago" or "3 d ago".
-    static func ago(_ date: Date, now: Date) -> String {
+    /// Copy rule: relative only under an hour ("just now", "4 min ago"), then a clock time
+    /// ("at 14:02"), with the date when it is more than a day old or on an earlier day ("19 Oct 14:02").
+    static func when(_ date: Date, now: Date, timeZone: TimeZone) -> String {
         let seconds = max(0, now.timeIntervalSince(date))
         switch seconds {
         case ..<60: return "just now"
         case ..<3600: return "\(Int(seconds / 60)) min ago"
-        case ..<86_400: return "\(Int(seconds / 3600)) h ago"
-        default: return "\(Int(seconds / 86_400)) d ago"
+        default:
+            let stamp = TimeText.stamp(date, now: now, timeZone: timeZone)
+            return TimeText.needsDate(date, now: now, timeZone: timeZone) ? stamp : "at \(stamp)"
         }
     }
 }

@@ -165,6 +165,89 @@ extension AppModelTests {
         #expect(model.vehicleStore.isStarted)
     }
 
+    /// Back in the foreground with the store already following the car: `refresh()` re-reads the row
+    /// (Realtime may have missed updates while the app was suspended) without restarting the store.
+    @Test func foregroundRefetchesRowWhenStarted() async throws {
+        let defaults = UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)")!
+        let cache = FileSnapshotCache(url: try Fixture.temporaryDirectory().appendingPathComponent("vehicle_state.json"))
+        let vehicle = Vehicle(id: vehicleID, vin: "LRWYGCEK0PC123456", displayName: "Model Y")
+        var first = VehicleState()
+        first.vehicleId = vehicleID
+        first.soc = 50
+        first.updatedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let rows = MutableRows(vehicle: vehicle, state: first)
+        let user = userID
+        let config = SupabaseEnvironment.Config(
+            supabaseURL: URL(string: "https://stub-\(UUID().uuidString).test")!,
+            publishableKey: "sb_publishable_test",
+            apiBaseURL: URL(string: "https://api-\(UUID().uuidString).test")!
+        )
+        let model = AppModel(
+            environment: SupabaseEnvironment(config: config, authStorage: MemoryAuthStorage()),
+            defaults: defaults,
+            cache: cache,
+            checks: OnboardingFlow.Checks(
+                sessionUserID: { user },
+                isTeslaConnected: { true },
+                vehicle: { vehicle },
+                proxyReachability: { .reachable }
+            ),
+            endSession: {},
+            makeStore: { VehicleStore(feed: IdleFeed(), fetcher: rows, cache: cache) }
+        )
+        await model.launch()
+        let store = model.vehicleStore
+        #expect(store.isStarted)
+        #expect(store.state?.soc == 50)
+        let reads = rows.stateCalls
+
+        var newer = first
+        newer.soc = 63
+        newer.updatedAt = Date(timeIntervalSince1970: 2_000_000_600)
+        rows.state = newer
+        await model.refresh()
+
+        #expect(model.vehicleStore === store)
+        #expect(store.isStarted)
+        #expect(rows.stateCalls == reads + 1, "one free re-read")
+        #expect(store.state?.soc == 63)
+    }
+
+    /// Going to the background sends the usage counts still waiting for their window, so a command
+    /// sent just before the app is suspended is counted.
+    @Test func backgroundFlushesUsage() async throws {
+        let backend = URLStub()
+        let proxy = URLStub()
+        backend.on("GET", "/api/token") { _ in .json(200, #"{"access_token":"tesla-1","expires_at":"2099-01-01T00:00:00Z"}"#) }
+        backend.on("POST", "/api/usage") { _ in .json(200, #"{"ok":true}"#) }
+        proxy.on("POST", "/api/1/vehicles/VIN/command/door_lock") { _ in .json(200, #"{"response":{"result":true,"reason":""}}"#) }
+        let defaults = UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)")!
+        ProxyOverride.set(proxy.baseURL(port: 4443), in: defaults)
+        let cache = FileSnapshotCache(url: try Fixture.temporaryDirectory().appendingPathComponent("vehicle_state.json"))
+        let config = SupabaseEnvironment.Config(
+            supabaseURL: URL(string: "https://stub-\(UUID().uuidString).test")!,
+            publishableKey: "sb_publishable_test",
+            apiBaseURL: backend.baseURL()
+        )
+        let model = AppModel(
+            environment: SupabaseEnvironment(config: config, authStorage: MemoryAuthStorage()),
+            defaults: defaults,
+            cache: cache,
+            checks: nil,
+            endSession: {},
+            api: GarageAPI(baseURL: backend.baseURL(), session: backend.session, supabaseToken: { "sb-jwt" }),
+            makeStore: { VehicleStore(feed: IdleFeed(), fetcher: NoRows(), cache: cache) },
+            proxySession: proxy.session
+        )
+
+        let start = ContinuousClock.now
+        #expect(try await model.commandClient.send(.doorLock, vin: "VIN"))
+        model.didEnterBackground()
+        #expect(await eventually { backend.requests("POST", "/api/usage").count == 1 })
+        #expect(ContinuousClock.now - start < UsageReporter.defaultCoalesce, "sent on backgrounding, not after the batching wait")
+        #expect(backend.requests("POST", "/api/usage").first?.jsonBody == ["category": "commands", "count": 1])
+    }
+
     /// Going to the background writes the store's pending snapshot.
     @Test func backgroundFlushesSnapshot() async throws {
         let (defaults, cache) = try seed()

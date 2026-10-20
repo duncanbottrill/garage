@@ -52,12 +52,6 @@ public enum CommandError: Error, Sendable, Equatable, LocalizedError {
 
     /// `HH:mm` in the device's time zone.
     static func clockTime(_ date: Date, timeZone: TimeZone = .current) -> String {
-        var style = Date.VerbatimFormatStyle(
-            format: "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)",
-            timeZone: timeZone,
-            calendar: Calendar(identifier: .gregorian)
-        )
-        style.locale = Locale(identifier: "en_US_POSIX")
-        return date.formatted(style)
+        TimeText.clock(date, timeZone: timeZone)
     }
 }
