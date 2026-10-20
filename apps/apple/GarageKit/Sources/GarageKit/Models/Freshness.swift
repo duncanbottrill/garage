@@ -3,8 +3,8 @@ import Foundation
 /// How recent a reading is, from its `*_at` timestamp (spec §10).
 ///
 /// - `.live`: at most ``liveWindow`` (90 s) old, the same window that decides whether the bridge is online.
-/// - `.aging(age)`: older than 90 s but younger than the stale threshold.
-/// - `.stale(age)`: at least the stale threshold old (10 min by default).
+/// - `.aging(age)`: older than 90 s, up to and including the stale threshold.
+/// - `.stale(age)`: strictly older than the stale threshold (10 min by default).
 /// - `.unknown`: never reported.
 ///
 /// Ages are clamped at 0, so a timestamp slightly in the future (clock skew) reads as `.live`.
@@ -16,7 +16,7 @@ public enum Freshness: Sendable, Equatable {
 
     /// Readings up to this age are live, and the bridge is online while it last checked in within it.
     public static let liveWindow: TimeInterval = 90
-    /// The default age at which a field is stale (10 min).
+    /// The default stale threshold (10 min): a field is stale once strictly older than this.
     public static let defaultStaleAfter: TimeInterval = 600
 
     /// Classifies a reading stamped `date` as of `now`.
@@ -24,7 +24,7 @@ public enum Freshness: Sendable, Equatable {
         guard let date else { return .unknown }
         let age = max(0, now.timeIntervalSince(date))
         if age <= liveWindow { return .live }
-        if age < staleAfter { return .aging(age) }
+        if age <= staleAfter { return .aging(age) }
         return .stale(age)
     }
 

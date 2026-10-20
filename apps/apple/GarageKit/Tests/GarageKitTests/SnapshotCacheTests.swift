@@ -29,4 +29,15 @@ import Testing
         let appSupport = try #require(FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first)
         #expect(standard.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL == appSupport.standardizedFileURL)
     }
+
+    /// A truncated or foreign file is treated as no snapshot rather than crashing or throwing.
+    @Test func corruptCacheLoadsAsNil() throws {
+        let dir = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("vehicle_state.json")
+        try Data("{\"soc\": 33.9, \"updated_at\": ".utf8).write(to: url)
+        #expect(FileSnapshotCache(url: url).load() == nil)
+        try Data("[1, 2, 3]".utf8).write(to: url)
+        #expect(FileSnapshotCache(url: url).load() == nil)
+    }
 }

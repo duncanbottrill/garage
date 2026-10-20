@@ -3,12 +3,12 @@ import Foundation
 
 /// GarageKit: the logic and views of the Garage app. The app target is a thin shell around it.
 public enum GarageKit {
-    /// The bundled typefaces (SIL OFL 1.1), by file name. Big Shoulders Display sets the numerals,
-    /// Instrument Sans the UI text.
     /// GarageKit's resource bundle. Test targets that bundle their own resources get a `Bundle.module`
     /// of their own, which shadows this one under `@testable import`; they name this instead.
     static var resources: Bundle { .module }
 
+    /// The bundled typefaces (SIL OFL 1.1), by file name. Big Shoulders Display sets the numerals,
+    /// Instrument Sans the UI text.
     static let fontFiles = ["BigShouldersDisplay[wght].ttf", "InstrumentSans[wdth,wght].ttf"]
 
     /// Registers the bundled fonts for this process so `Font.custom` resolves them by family name.

@@ -62,6 +62,8 @@ public final class VehicleStore {
     @ObservationIgnored private let cache: any SnapshotCache
     @ObservationIgnored private var feedTask: Task<Void, Never>?
     @ObservationIgnored private var missedUpdates = false
+    /// Bumped by every `start()` and `stop()`; work begun under an older value is abandoned.
+    @ObservationIgnored private var generation = 0
 
     public init(
         feed: any RealtimeFeed,
@@ -85,31 +87,43 @@ public final class VehicleStore {
     }
 
     /// Fetches the vehicle and its row, then starts following Realtime. Returns once the feed is
-    /// running; does nothing more when the owner has no vehicle yet. Calling it again restarts.
+    /// running; does nothing more when the owner has no vehicle yet. Calling it again restarts, and
+    /// a ``stop()`` or a newer `start()` while this one is still fetching wins: this one then returns
+    /// without writing anything or opening a feed.
     public func start() async {
         stop()
-        await refreshVehicle()
+        let mine = generation
+
+        let fetchedVehicle = await loadVehicle()
+        guard generation == mine else { return }
+        if let fetchedVehicle { vehicle = fetchedVehicle }
         guard let vehicle else { return }
         // A snapshot cached for another car (a different account) must not be shown or merged into.
         if let cachedID = state?.vehicleId, cachedID != vehicle.id {
             state = nil
         }
-        await refetchState(vehicleID: vehicle.id)
+
+        let fetchedState = await loadState(vehicleID: vehicle.id)
+        guard generation == mine else { return }
+        adoptFetched(fetchedState)
 
         let events = feed.events(for: vehicle.id)
+        feedTask?.cancel()
         feedTask = Task { [weak self] in
             for await event in events {
                 guard let self, !Task.isCancelled else { return }
-                await self.handle(event, vehicleID: vehicle.id)
+                await self.handle(event, vehicleID: vehicle.id, generation: mine)
             }
         }
     }
 
-    /// Stops following Realtime. The current state stays on screen.
+    /// Stops following Realtime and abandons any `start()` still fetching. The current state stays on screen.
     public func stop() {
+        generation &+= 1
         feedTask?.cancel()
         feedTask = nil
         isLive = false
+        missedUpdates = false
     }
 
     /// Applies a Realtime record (column → value). Columns the record omits keep their current value;
@@ -127,14 +141,18 @@ public final class VehicleStore {
         }
     }
 
-    private func handle(_ event: RealtimeFeedEvent, vehicleID: UUID) async {
+    private func handle(_ event: RealtimeFeedEvent, vehicleID: UUID, generation mine: Int) async {
+        guard generation == mine else { return }
         switch event {
         case .subscribed:
             isLive = true
             if missedUpdates {
                 missedUpdates = false
-                await refreshVehicle()
-                await refetchState(vehicleID: vehicleID)
+                let fetchedVehicle = await loadVehicle()
+                let fetchedState = await loadState(vehicleID: vehicleID)
+                guard generation == mine else { return }
+                if let fetchedVehicle { vehicle = fetchedVehicle }
+                adoptFetched(fetchedState)
             }
         case .disconnected:
             isLive = false
@@ -145,23 +163,29 @@ public final class VehicleStore {
     }
 
     /// `vehicles` is not in the Realtime publication, so budget mode and proxy URL refresh on fetch.
-    private func refreshVehicle() async {
+    private func loadVehicle() async -> Vehicle? {
         do {
-            if let fetched = try await fetcher.fetchVehicle() { vehicle = fetched }
+            return try await fetcher.fetchVehicle()
         } catch {
             Self.logger.error("Vehicle fetch failed: \(error)")
+            return nil
         }
     }
 
-    private func refetchState(vehicleID: UUID) async {
+    private func loadState(vehicleID: UUID) async -> VehicleState? {
         do {
-            guard let fetched = try await fetcher.fetchState(vehicleID: vehicleID) else { return }
-            // A slow fetch must not roll back a newer Realtime row.
-            if let current = state?.updatedAt, let incoming = fetched.updatedAt, incoming < current { return }
-            adopt(fetched)
+            return try await fetcher.fetchState(vehicleID: vehicleID)
         } catch {
             Self.logger.error("vehicle_state fetch failed: \(error)")
+            return nil
         }
+    }
+
+    private func adoptFetched(_ fetched: VehicleState?) {
+        guard let fetched else { return }
+        // A slow fetch must not roll back a newer Realtime row.
+        if let current = state?.updatedAt, let incoming = fetched.updatedAt, incoming < current { return }
+        adopt(fetched)
     }
 
     private func adopt(_ next: VehicleState) {
