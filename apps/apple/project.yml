@@ -5,9 +5,6 @@ options:
     iOS: "26.0"
     macOS: "26.0"
   createIntermediateGroups: true
-  # Signing.xcconfig is git-ignored (copy Signing.xcconfig.example); generation must not fail on a fresh clone.
-  disabledValidations:
-    - missingConfigFiles
 packages:
   GarageKit:
     path: GarageKit
@@ -20,9 +17,11 @@ targets:
       - Garage
     dependencies:
       - package: GarageKit
+    # Base.xcconfig is committed and optionally includes the git-ignored Signing.xcconfig
+    # (copy Signing.xcconfig.example), so a fresh clone generates and builds.
     configFiles:
-      Debug: Signing.xcconfig
-      Release: Signing.xcconfig
+      Debug: Base.xcconfig
+      Release: Base.xcconfig
     settings:
       base:
         SWIFT_VERSION: "6.0"
