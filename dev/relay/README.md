@@ -40,6 +40,8 @@ on the relay.
    `issuer=O=Garage Bridge CA` (plus a client-certificate request on
    OpenSSL 3) means the car will reach the receiver.
 
+On Oracle Linux the script avoids dnf entirely (it exhausts the 1 GB shape): Tailscale comes from its static tarball and the forwarder is `garage-relay.py` (stdlib only). Ubuntu uses apt + socat.
+
 `TARGET` defaults to the garage-bridge node's tailnet IP and port 8443; pass
 `TARGET=<ip>:8443` if the node ever changes address (`tailscale status` on
 the relay lists it). Oracle reclaims idle Always Free VMs after seven days of
