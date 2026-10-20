@@ -7,12 +7,14 @@ local Swift package `GarageKit`, which holds the logic, views, design tokens, fo
 
 ```sh
 brew install xcodegen                         # once
-cp Signing.xcconfig.example Signing.xcconfig  # git-ignored; holds DEVELOPMENT_TEAM
+cp Signing.xcconfig.example Signing.xcconfig  # git-ignored; holds DEVELOPMENT_TEAM (optional for unsigned builds)
 xcodegen generate                             # writes Garage.xcodeproj (git-ignored)
 open Garage.xcodeproj
 ```
 
-The first package resolution (supabase-swift, swift-snapshot-testing) takes a few minutes.
+The first package resolution (supabase-swift, swift-snapshot-testing) takes a few minutes. The target's base
+configuration is the committed `Base.xcconfig`, which includes `Signing.xcconfig` only when it exists, so a fresh
+clone without it still generates and builds with `CODE_SIGNING_ALLOWED=NO`.
 
 ## Build and test
 
@@ -45,7 +47,15 @@ icon asset catalog there, so `IconsTests.iconIsBundledAsTemplate` fails under it
 5. **Tailscale.** Install Tailscale on both the iPhone and the Mac and sign them in to the same tailnet as the bridge,
    with MagicDNS on (the proxy URL is a `*.ts.net` name). Commands go to the bridge over the tailnet; Status and More
    work without it.
-6. **Supabase.** The owner setup below must be done once: Apple provider with the bundle id in Client IDs, manual
+6. **Bridge add-on 0.3.0 and its proxy URL.** Before onboarding step 4 ("Reach your home bridge"), the Garage
+   Bridge add-on must run version 0.3.0 or later (Home Assistant → Settings → Add-ons → Garage Bridge shows the
+   version; update it there). 0.3.0 is the release whose proxy presents the Let's Encrypt certificate for the
+   tailnet name, which iOS and macOS trust, and which publishes the proxy URL. Check that it has: in the Supabase
+   dashboard, Table Editor → `vehicles`, the car's `proxy_base_url` column holds `https://<tailnet name>:4443`
+   (or run `select vin, proxy_base_url from vehicles;` in the SQL editor). While it is `null` the step says the
+   bridge hasn't published its address; once it is set, "Check again" re-reads it and moves on, no relaunch needed.
+   It stays `null` when the add-on runs with `tailscale_enabled` off.
+7. **Supabase.** The owner setup below must be done once: Apple provider with the bundle id in Client IDs, manual
    linking on, email/password kept for the bootstrap account. Sign in with **Use email** first, then run More →
    Link Apple ID.
 
@@ -138,8 +148,8 @@ Minor items that earlier reviews deferred and Slice 1C leaves open, plus what re
   exist that day.
 - **°F targets.** The stepper moves one whole °F and stores the nearest 0.5 °C, so the number on screen never repeats
   or skips. The car still receives 0.5 °C steps, so its own °F display can differ from Garage's by up to 0.45 °F.
-- **Wake prompt under a sheet.** If a Status command needs a wake while a Climate or Charge sheet covers Status, the
-  prompt is not shown and the lock pill stays pending until the sheet closes.
+- **Wake prompt under a sheet.** A Status command that needs a wake while a Climate or Charge sheet covers Status is
+  declined (nothing is sent) rather than asking; send it again from the sheet or after closing it.
 - **Sheet edge cases.** An unrelated command queued behind one whose wake was cancelled is declined with it (asleep
   car only); a sent "on" schedule overlay sticks if the time is changed from elsewhere, until the sheet's model is
   dropped; the frunk → wake single-alert hand-over needs a device check; the `laterChangeRestartsQuietTime` test is
@@ -152,16 +162,11 @@ Minor items that earlier reviews deferred and Slice 1C leaves open, plus what re
   dedicated snapshot.
 - **Capsule edges.** A 1 px sliver may show along the edge of the Sign in with Apple button and the glass capsules
   on some displays; it does not show in snapshots, so it is a device check (row 15 above).
-- **Icons.** The bundled Lucide SVGs still carry 1.45 stamps although `fetch-icons.sh` pins 1.60.0; run the script to
-  refresh them.
 - **Realtime restart.** The client library skips the server unsubscribe for a channel that is still joining, so a
   very fast restart can leave a second channel briefly; check 14 above covers it on device. If the app was offline
   at launch and the network comes back while it stays in the foreground, the store starts at the next foreground
   (or the next onboarding check).
-- **Backend `last_error`.** The backend may keep `last_error` after a successful Tesla reconnect, keeping More's
-  Connection row red; verify live.
-- **Sign-in edge cases.** Two overlapping Tesla web sign-ins can clear the newer session's reference, and a very
-  quick re-auth can race the authenticator's clean-up; a 401 from an intermediary (not the backend) signs out
+- **Sign-in edge cases.** A 401 from an intermediary (not the backend) signs out
   locally; the backend's `token_exchange_failed` code is unused (it sends raw text, shown as generic copy); the email
   field trims spaces but not newlines.
 - **Vehicle check.** A car already in memory satisfies the onboarding vehicle check, so a car unlinked on another

@@ -127,7 +127,7 @@ One container, `s6-overlay` supervising five services:
 | `tailscale` | `tailscaled --tun=userspace-networking` | Joins the tailnet as its own node (hostname configurable, `garage-bridge` by default); `tailscale serve --tcp=443 tcp://127.0.0.1:8443` plus `tailscale funnel 443 on` publishes the telemetry receiver to the public internet as a raw TCP forward (TLS, including the car's client certificate, terminates in `fleet-telemetry`, never in Tailscale); a second rule, `tailscale serve --tcp=4443 tcp://127.0.0.1:4443`, exposes the command proxy on the tailnet only — never funneled |
 | `tlscert` | `tailscale cert` | Issues/renews the Let's Encrypt certificate for the node's `*.ts.net` hostname once a day; see §5.6 |
 | `telemetry` | `fleet-telemetry` v0.9.5 (Tesla's binary, unmodified) | Terminates the car's mTLS stream on `0.0.0.0:8443`; republishes every record to the HA Mosquitto broker add-on on topics `garage/<VIN>/v/<Field>`, `garage/<VIN>/connectivity`, `garage/<VIN>/alerts/<name>/current`, `garage/<VIN>/errors/<name>` |
-| `proxy` | `tesla-http-proxy` v0.4.1 (`github.com/teslamotors/vehicle-command`) | Holds our Tesla command private key; signs Fleet API requests and, transparently, the telemetry config JWS; binds `127.0.0.1:4443` behind its own self-signed TLS pair (not the Let's Encrypt pair, which belongs to `telemetry`'s tailnet FQDN); reachable from the tailnet via the `tailscale serve` rule above |
+| `proxy` | `tesla-http-proxy` v0.4.1 (`github.com/teslamotors/vehicle-command`) | Holds our Tesla command private key; signs Fleet API requests and, transparently, the telemetry config JWS; binds `127.0.0.1:4443` behind its own TLS pair in `/data/proxy-tls`: since add-on 0.3.0 that is the Let's Encrypt certificate for the node's tailnet FQDN (`tlscert` writes a copy there and restarts the proxy when it changes), so iOS and macOS trust it without pinning; a self-signed pair is used only with `tailscale_enabled` off (or briefly on a first start, until `tailscale cert` answers); reachable from the tailnet via the `tailscale serve` rule above |
 | `ingest` | Node 22, TypeScript, bundles `@garage/core` | Subscribes to the Mosquitto topics, writes `signals` and patches `vehicle_state`, registers the telemetry config through `proxy`, adapts cadence to `vehicles.budget_mode`; see §5.2 |
 
 ### 5.2 Ingest worker behaviour
@@ -183,13 +183,13 @@ All secrets arrive through HA add-on options (encrypted at rest on the Green); n
 
 ### 5.7 Persistence
 
-Nothing persists outside `/data` on the Green's eMMC: `/data/tailscale` (node state/keys), `/data/tls` (the Let's Encrypt pair and chain), `/data/private-key.pem` (the normalised Tesla command key, mode 600), `/data/proxy-tls` (the proxy's own self-signed pair), `/data/config.json` (`fleet-telemetry`'s rendered config). The ingest's own bounded in-memory buffers (§5.2) are the only place a brief Supabase outage is absorbed; nothing is spooled to disk for that.
+Nothing persists outside `/data` on the Green's eMMC: `/data/tailscale` (node state/keys), `/data/tls` (the Let's Encrypt pair and chain), `/data/private-key.pem` (the normalised Tesla command key, mode 600), `/data/proxy-tls` (the proxy's pair: the Let's Encrypt certificate for the tailnet FQDN since 0.3.0, self-signed only with Tailscale disabled), `/data/config.json` (`fleet-telemetry`'s rendered config). The ingest's own bounded in-memory buffers (§5.2) are the only place a brief Supabase outage is absorbed; nothing is spooled to disk for that.
 
 ### 5.8 Deferred
 
 - A bridge credential narrower than the full Supabase service key — still deferred from the 1A.2 review; the ingest holds the full service key today.
 - `merge_vehicle_state`'s `p_clear` parameter and a merge staleness guard (§6.1) — still deferred from the 1A.2 review. The ingest only ever sends fields it actually received, so staleness mainly matters against a manual refresh (§4.6), which is rare.
-- The `proxy` service's own TLS listener uses a self-signed certificate on the tailnet rather than a trusted one; deferred to Plan 1C.
+- ~~The `proxy` service's own TLS listener uses a self-signed certificate on the tailnet rather than a trusted one; deferred to Plan 1C.~~ Done in add-on 0.3.0 (Plan 1C): the listener presents the Let's Encrypt certificate for the tailnet FQDN, and is self-signed only when Tailscale is disabled.
 - MQTT → HA entity discovery, so the car's fields show up as native HA sensors/automations, is deferred to slice 4. `fleet-telemetry` already publishes the per-field topics a later discovery layer would consume.
 ## 6. Data model (Supabase)
 
@@ -282,7 +282,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 
 - SwiftUI, one Xcode project, targets iOS 26 and macOS 26. Swift Package `GarageKit` holds the vehicle store, command client, models and design tokens; the app target is thin.
 - **VehicleStore**: Supabase Swift SDK, Realtime subscription to `vehicle_state`; per-field freshness; last snapshot persisted in app support for instant cold launch.
-- **CommandClient**: base URL from settings (tailnet name), bearer from `/api/token`, optimistic state with `pending` markers, idempotency key per tap, 10 s timeout, typed errors mapped to copy. Detects Tailscale reachability by probing the proxy health endpoint; when unreachable, controls disable with a "Connect Tailscale" action (opens the Tailscale app).
+- **CommandClient**: base URL from settings (tailnet name), bearer from `/api/token`, optimistic state with `pending` markers, a per-command in-flight guard (a second tap of a command already in flight is dropped), 10 s timeout, typed errors mapped to copy. Detects Tailscale reachability with a TLS handshake probe of the proxy (nothing billed); when unreachable, controls disable with a "Connect Tailscale" action (opens the Tailscale app).
 - **Screens**: Status (04), Climate sheet, Charge sheet, More, Onboarding. Onboarding has four steps: (1) Sign in with Apple, which creates the Supabase account that owns everything; (2) Connect Tesla: `POST /auth/start` with the Supabase JWT returns the Tesla URL, which the app opens in `ASWebAuthenticationSession`, returning on `garage://connected`; (3) confirm the vehicle (one in slice 1, picker later); (4) check Tailscale reachability of the proxy, with instructions and the pairing deep link if the key is not yet paired. Drives, Charges, Battery tabs ship with designed empty states.
 - **Navigation**: iPhone `TabView` with the iOS 26 floating glass tab bar; Mac `NavigationSplitView` sidebar with the same five sections and a two-column Status (map left, sheet content right).
 - **Map**: MapKit with a dark standard style, car annotation with a breathing halo while `bridge_seen_at` is fresh, recent trail from the last 30 minutes of `Location` signals.
@@ -302,7 +302,7 @@ The proxy needs a Tesla bearer token on each request. The app never holds the re
 | Condition | Detection | User sees |
 |---|---|---|
 | House/bridge offline | `bridge_seen_at` > 90 s | figures show age; car dot solid; banner "Telemetry paused since 14:02" |
-| Tailscale not connected on device | proxy health probe fails | controls disabled; "Connect Tailscale" button |
+| Tailscale not connected on device | proxy TLS handshake probe fails | controls disabled; "Connect Tailscale" button |
 | Command rejected | proxy/Tesla error | optimistic state reverts; plain-language reason; key-missing errors point to pairing |
 | Car asleep | `sleep_state` | prompt before wake; wakes counted |
 | Token refresh failing | cron error → `tesla_credentials.rotated_at` stale | red row in More; push notification (slice 4); app keeps last-known data, never signs out |
