@@ -23,7 +23,12 @@ let package = Package(
         ),
         .testTarget(
             name: "GarageKitTests",
-            dependencies: ["GarageKit"]
+            dependencies: [
+                "GarageKit",
+                // `AnyJSON` (the Realtime record type) is declared in the Supabase product.
+                .product(name: "Supabase", package: "supabase-swift"),
+            ],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "GarageKitSnapshotTests",

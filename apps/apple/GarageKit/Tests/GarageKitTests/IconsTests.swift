@@ -15,10 +15,10 @@ import AppKit
     /// Every Lucide icon the app names is in GarageKit's asset catalog, as a template image.
     @Test(arguments: names) func iconIsBundledAsTemplate(_ name: String) throws {
         #if canImport(UIKit)
-        let image = try #require(UIImage(named: name, in: .module, with: nil))
+        let image = try #require(UIImage(named: name, in: GarageKit.resources, with: nil))
         #expect(image.renderingMode == .alwaysTemplate)
         #else
-        let image = try #require(Bundle.module.image(forResource: name))
+        let image = try #require(GarageKit.resources.image(forResource: name))
         #expect(image.isTemplate)
         #endif
     }
