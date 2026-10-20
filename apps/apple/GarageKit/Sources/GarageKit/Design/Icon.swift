@@ -13,7 +13,7 @@ public struct Icon: View {
         case batteryCharging = "battery-charging", plug, plugZap = "plug-zap", carFront = "car-front"
         case navigation, mapPin = "map-pin", fan, wind, zap, clock, refreshCw = "refresh-cw", settings
         case chevronRight = "chevron-right", circleAlert = "circle-alert", wifiOff = "wifi-off"
-        case check, x, sun, moon, gauge, route
+        case check, x, sun, moon, gauge, route, minus, plus
     }
 
     /// The design stroke width for icons, in points.

@@ -206,7 +206,8 @@ public struct StatusModel: Sendable, Equatable {
         }
     }
 
-    private static func chargeLine(_ state: VehicleState?, now: Date, timeZone: TimeZone) -> String {
+    /// The charge line for `state` (see ``chargeLine``); shared with the Charge sheet.
+    static func chargeLine(_ state: VehicleState?, now: Date, timeZone: TimeZone) -> String {
         guard let state else { return placeholder }
         if state.chargeState?.lowercased() == "charging" {
             var line = "Charging"
@@ -231,7 +232,8 @@ public struct StatusModel: Sendable, Equatable {
         return nil
     }
 
-    private static func message(for banner: Banner, timeZone: TimeZone) -> String {
+    /// The one line of copy for `banner`; the control sheets reuse the Tailscale line.
+    static func message(for banner: Banner, timeZone: TimeZone) -> String {
         switch banner {
         case let .telemetryPaused(since?):
             "Telemetry paused since \(CommandError.clockTime(since, timeZone: timeZone))"

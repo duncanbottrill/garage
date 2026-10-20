@@ -10,7 +10,7 @@ import AppKit
 @Suite struct IconsTests {
     static let names = ["lock", "lock-open", "thermometer", "snowflake", "flame", "battery-charging", "plug", "plug-zap",
                         "car-front", "navigation", "map-pin", "fan", "wind", "zap", "clock", "refresh-cw", "settings",
-                        "chevron-right", "circle-alert", "wifi-off", "check", "x", "sun", "moon", "gauge", "route"]
+                        "chevron-right", "circle-alert", "wifi-off", "check", "x", "sun", "moon", "gauge", "route", "minus", "plus"]
 
     /// Every Lucide icon the app names is in GarageKit's asset catalog, as a template image.
     @Test(arguments: names) func iconIsBundledAsTemplate(_ name: String) throws {

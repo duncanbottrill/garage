@@ -30,11 +30,7 @@ struct StatusSheet: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: Tokens.Space.m) {
             if docked {
-                Capsule(style: .continuous)
-                    .fill(Tokens.Colors.muted.opacity(Tokens.Opacity.accentStroke))
-                    .frame(width: 36, height: 4)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityHidden(true)
+                GrabIndicator()
             }
             VStack(alignment: .leading, spacing: Tokens.Space.xs) {
                 HeroNumeral(model: model)

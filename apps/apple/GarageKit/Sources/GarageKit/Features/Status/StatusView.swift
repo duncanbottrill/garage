@@ -7,17 +7,21 @@ import SwiftUI
 /// top half shows the map. Mac and wide windows: the map is full-bleed and the sheet floats as a
 /// panel on the trailing side.
 ///
-/// Commands go through ``AppModel/commandClient``. Lock/Unlock flips the lock icon at once
-/// (optimistic, ``OptimisticLock``) and reverts with the error's copy in a toast if the command fails;
-/// Frunk asks first.
+/// Commands go through ``AppModel/commandClient`` via a ``CommandRunner``, so an asleep car gets the
+/// ``WakePrompt`` first and failures show a ``CommandToast``. Lock/Unlock flips the lock icon at once
+/// (optimistic, ``OptimisticLock``) and reverts if the command fails; Frunk asks first.
+///
+/// The Climate and Charge pills present ``ClimateSheet`` and ``ChargeSheet`` (`.sheet(item:)`), whose
+/// models live as long as this view so the sheets keep what they last sent; pass `onOpenClimate` or
+/// `onOpenCharge` to handle a pill elsewhere instead.
 public struct StatusView: View {
     /// Narrower than this, the sheet docks to the bottom; wider, it floats beside the map.
     /// 780 keeps the map at least 420 pt wide beside the widest (420 pt) panel and its margins.
     static let wideLayoutWidth: CGFloat = 780
     /// The least map the docked sheet leaves visible below the status bar when it grows.
     static let minimumMapHeight: CGFloat = 160
-    /// How long a command toast stays up.
-    static let toastDuration: Duration = .seconds(5)
+    /// How long the frunk confirmation needs to go away before a wake prompt can be presented.
+    static let alertHandoff: Duration = .milliseconds(450)
 
     private enum Source {
         case app(AppModel)
@@ -25,7 +29,7 @@ public struct StatusView: View {
         case fixed(StatusModel, trail: [TrailPoint], pending: Set<String>)
     }
 
-    private enum Placeholder: String, Identifiable {
+    private enum ControlSheetKind: String, Identifiable {
         case climate, charge
         var id: String { rawValue }
     }
@@ -36,17 +40,19 @@ public struct StatusView: View {
     private let onOpenCharge: (() -> Void)?
 
     @State private var optimisticLock = OptimisticLock()
-    @State private var toast: String?
+    @State private var runner: CommandRunner
     @State private var confirmingFrunk = false
-    @State private var placeholder: Placeholder?
+    @State private var presentedSheet: ControlSheetKind?
+    @State private var climate: ClimateModel?
+    @State private var charge: ChargeModel?
     @State private var trailLoader: TrailLoader?
     @Environment(\.openURL) private var openURL
 
     /// - Parameters:
     ///   - model: The app model: the vehicle store, the command client and the Supabase client (trail).
     ///   - mapEnabled: False draws a flat ground instead of MapKit (deterministic snapshots).
-    ///   - onOpenClimate: Opens the Climate sheet. Until one is supplied, a placeholder sheet shows.
-    ///   - onOpenCharge: Opens the Charge sheet. Until one is supplied, a placeholder sheet shows.
+    ///   - onOpenClimate: Replaces the Climate pill's action; by default it presents ``ClimateSheet``.
+    ///   - onOpenCharge: Replaces the Charge pill's action; by default it presents ``ChargeSheet``.
     public init(
         model: AppModel,
         mapEnabled: Bool = true,
@@ -57,6 +63,10 @@ public struct StatusView: View {
         self.mapEnabled = mapEnabled
         self.onOpenClimate = onOpenClimate
         self.onOpenCharge = onOpenCharge
+        let commands = Self.commands(model)
+        let runner = CommandRunner(send: commands.send, wake: commands.wake)
+        runner.isAsleep = { [weak model] in model?.vehicleStore.state?.sleepState?.lowercased() == "asleep" }
+        _runner = State(initialValue: runner)
     }
 
     /// A fixed screen: `status` as given, with the commands in `pending` drawn in flight. Animations are off.
@@ -65,22 +75,20 @@ public struct StatusView: View {
         self.mapEnabled = mapEnabled
         onOpenClimate = nil
         onOpenCharge = nil
+        _runner = State(initialValue: CommandRunner(send: { _ in true }, wake: { true }))
     }
 
     public var body: some View {
         content
             .alert("Open the frunk?", isPresented: $confirmingFrunk) {
-                Button("Open frunk") { send(.actuateFrunk) }
+                Button("Open frunk") { openFrunk() }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("The lid pops up. Check nothing is resting on it.")
             }
-            .sheet(item: $placeholder) { PlaceholderSheet(kind: $0) }
-            .task(id: toast) {
-                guard toast != nil else { return }
-                try? await Task.sleep(for: Self.toastDuration)
-                if !Task.isCancelled { toast = nil }
-            }
+            .wakePrompt(runner)
+            .autoDismissingToast(runner)
+            .sheet(item: $presentedSheet) { controlSheet($0) }
     }
 
     @ViewBuilder
@@ -98,11 +106,16 @@ public struct StatusView: View {
                         optimisticLocked: optimisticLock.target
                     ),
                     trail: trailLoader?.points ?? [],
-                    pending: app.commandClient.pending,
+                    pending: app.commandClient.pending.union(runner.pending),
                     actionsEnabled: store.vehicle != nil
                 )
             }
             .task(id: store.vehicle?.id) { await loadTrail(app) }
+            .onChange(of: store.vehicle?.id) {
+                // A different car: the sheets' remembered target, seats and schedule belong to the old one.
+                climate = nil
+                charge = nil
+            }
             .onChange(of: store.state?.locationAt) { appendTrailPoint(store.state) }
             .onChange(of: store.state?.locked) { optimisticLock.rowChanged(locked: store.state?.locked) }
         case let .fixed(status, trail, pending):
@@ -117,8 +130,8 @@ public struct StatusView: View {
         GeometryReader { geometry in
             let actions = QuickActions.Actions(
                 toggleLock: { toggleLock(status) },
-                openClimate: { if let onOpenClimate { onOpenClimate() } else { placeholder = .climate } },
-                openCharge: { if let onOpenCharge { onOpenCharge() } else { placeholder = .charge } },
+                openClimate: { if let onOpenClimate { onOpenClimate() } else { present(.climate) } },
+                openCharge: { if let onOpenCharge { onOpenCharge() } else { present(.charge) } },
                 openFrunk: { confirmingFrunk = true }
             )
             if geometry.size.width >= Self.wideLayoutWidth {
@@ -191,13 +204,11 @@ public struct StatusView: View {
                     openURL(TailscaleLink.destination(installed: TailscaleLink.isInstalled()))
                 }
             }
-            if let toast {
-                NoticeStrip(icon: .circleAlert, tint: Tokens.Colors.danger, message: toast) { self.toast = nil }
-                    .accessibilityHint("Dismisses the message")
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            if let toast = runner.toast {
+                CommandToast(message: toast.message) { runner.dismissToast() }
             }
         }
-        .animation(.snappy, value: toast)
+        .animation(.snappy, value: runner.toast)
     }
 
     // MARK: Commands
@@ -205,39 +216,74 @@ public struct StatusView: View {
     private func toggleLock(_ status: StatusModel) {
         guard case let .app(app) = source else { return }
         // One lock command at a time: a second tap while one is in flight would flip the icon back.
-        let pending = app.commandClient.pending
+        let pending = app.commandClient.pending.union(runner.pending)
         guard !pending.contains(Command.doorLock.name), !pending.contains(Command.doorUnlock.name) else { return }
         let target = status.lockState != .locked
         guard let intent = optimisticLock.begin(target: target) else { return }
         Task {
-            switch await perform(target ? .doorLock : .doorUnlock) {
-            case true?:
+            if await runner.run(target ? .doorLock : .doorUnlock) == .sent {
                 await optimisticLock.sent(intent, rowLocked: app.vehicleStore.state?.locked)
-            case false?, nil:
-                // Failed (the toast says why), or the same command was already in flight.
+            } else {
+                // Failed (the toast says why), declined at the wake prompt, or already in flight.
                 optimisticLock.failed(intent)
             }
         }
     }
 
-    private func send(_ command: Command) {
-        Task { _ = await perform(command) }
+    private func openFrunk() {
+        guard case .app = source else { return }
+        Task {
+            // The frunk confirmation is still going away; a wake prompt presented now would be dropped.
+            if runner.needsWakePrompt { try? await Task.sleep(for: Self.alertHandoff) }
+            await runner.run(.actuateFrunk)
+        }
     }
 
-    /// Sends a command; a failure is shown as a toast. Returns the client's result, or nil on failure.
-    private func perform(_ command: Command) async -> Bool? {
-        guard case let .app(app) = source else { return true }
-        guard let vin = app.vehicleStore.vehicle?.vin else { return nil }
-        do {
+    /// `send` and `wake` for the app's car, read at call time (the client is replaced on sign-out).
+    private static func commands(_ app: AppModel) -> (send: CommandRunner.Send, wake: CommandRunner.Wake) {
+        let send: CommandRunner.Send = { [weak app] command in
+            guard let app, let vin = app.vehicleStore.vehicle?.vin else { throw CommandError.unreachable }
             return try await app.commandClient.send(command, vin: vin)
-        } catch let error as CommandError {
-            toast = error.errorDescription
-        } catch is CancellationError {
-            // The screen went away; nothing to tell.
-        } catch {
-            toast = error.localizedDescription
         }
-        return nil
+        let wake: CommandRunner.Wake = { [weak app] in
+            guard let app, let vin = app.vehicleStore.vehicle?.vin else { throw CommandError.unreachable }
+            return try await app.commandClient.wake(vin: vin)
+        }
+        return (send, wake)
+    }
+
+    // MARK: Sheets
+
+    private func present(_ kind: ControlSheetKind) {
+        guard case let .app(app) = source else { return }
+        let commands = Self.commands(app)
+        switch kind {
+        case .climate where climate == nil:
+            climate = ClimateModel(send: commands.send, wake: commands.wake)
+        case .charge where charge == nil:
+            charge = ChargeModel(send: commands.send, wake: commands.wake)
+        default:
+            break
+        }
+        presentedSheet = kind
+    }
+
+    @ViewBuilder
+    private func controlSheet(_ kind: ControlSheetKind) -> some View {
+        if case let .app(app) = source {
+            switch kind {
+            case .climate:
+                if let climate {
+                    ClimateSheet(model: climate)
+                        .modifier(LiveCar(app: app) { climate.state = $0; climate.reachability = $1 })
+                }
+            case .charge:
+                if let charge {
+                    ChargeSheet(model: charge)
+                        .modifier(LiveCar(app: app) { charge.state = $0; charge.reachability = $1 })
+                }
+            }
+        }
     }
 
     // MARK: Trail
@@ -304,31 +350,14 @@ private struct HeightCap: Layout {
     }
 }
 
-/// Stands in for the Climate and Charge sheets until they are wired in.
-private struct PlaceholderSheet<Kind: RawRepresentable<String>>: View {
-    let kind: Kind
-    @Environment(\.dismiss) private var dismiss
+/// Keeps a sheet model's row and reachability current while the sheet is up.
+private struct LiveCar: ViewModifier {
+    let app: AppModel
+    let apply: (VehicleState?, ProxyReachability.State) -> Void
 
-    var body: some View {
-        VStack(spacing: Tokens.Space.l) {
-            Text(kind.rawValue.capitalized)
-                .garage(.title)
-                .foregroundStyle(Tokens.Colors.ink)
-            Text("These controls arrive in the next build.")
-                .garage(.body)
-                .foregroundStyle(Tokens.Colors.muted)
-            Button("Done") { dismiss() }
-                .garageButtonFont()
-        }
-        .padding(Tokens.Space.xxl)
-        .frame(minWidth: 320, minHeight: 200)
-        .presentationDetents([.medium])
-        .background(Tokens.Colors.background.ignoresSafeArea())
-    }
-}
-
-private extension View {
-    func garageButtonFont() -> some View {
-        font(TypeScale.body.font).foregroundStyle(Tokens.Colors.accent)
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: app.vehicleStore.state, initial: true) { apply(app.vehicleStore.state, app.commandClient.reachability) }
+            .onChange(of: app.commandClient.reachability) { apply(app.vehicleStore.state, app.commandClient.reachability) }
     }
 }
