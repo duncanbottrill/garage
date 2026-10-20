@@ -30,8 +30,13 @@ public enum GarageKit {
     static func fontURLs() -> [URL] {
         fontFiles.compactMap { file in
             let name = (file as NSString).deletingPathExtension
-            return Bundle.module.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts")
+            guard let url = Bundle.module.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts")
                 ?? Bundle.module.url(forResource: name, withExtension: "ttf")
+            else {
+                assertionFailure("GarageKit: bundled font \(file) is missing from the resources")
+                return nil
+            }
+            return url
         }
     }
 }

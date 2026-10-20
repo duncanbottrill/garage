@@ -26,6 +26,18 @@ The macOS build needs a Mac App Development provisioning profile (Sign in with A
 creates the first time with `-allowProvisioningUpdates` or by building once from Xcode. To check the code compiles
 without signing, add `CODE_SIGNING_ALLOWED=NO`.
 
+## Pinned versions
+
+| Source | Pin |
+| --- | --- |
+| supabase-swift | `.upToNextMinor(from: "2.55.4")` |
+| swift-snapshot-testing | `.upToNextMinor(from: "1.19.6")` |
+| google/fonts (fetch-fonts.sh) | commit `47d54ca1ebb14fd864695f1d39dc734f39017c33` |
+| lucide-static (fetch-icons.sh) | `1.60.0` |
+
+Package.resolved lives inside the generated (git-ignored) project, so the pins in `GarageKit/Package.swift` are what
+keeps a fresh clone on the same dependency lines. Bump them deliberately and update this table.
+
 ## Generated and fetched files
 
 - `GarageKit/Sources/GarageKit/Design/Tokens.swift` is generated from `packages/tokens/tokens.json`. Do not edit it;

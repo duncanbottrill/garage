@@ -9,8 +9,9 @@ let package = Package(
         .library(name: "GarageKit", targets: ["GarageKit"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/supabase/supabase-swift", from: "2.0.0"),
-        .package(url: "https://github.com/pointfreeco/swift-snapshot-testing", from: "1.17.0"),
+        // Pinned to the minor line resolved when the scaffold landed; bump deliberately (and in README.md).
+        .package(url: "https://github.com/supabase/supabase-swift", .upToNextMinor(from: "2.55.4")),
+        .package(url: "https://github.com/pointfreeco/swift-snapshot-testing", .upToNextMinor(from: "1.19.6")),
     ],
     targets: [
         .target(

@@ -6,7 +6,9 @@ cd "$(dirname "$0")/.."
 RES=GarageKit/Sources/GarageKit/Resources
 FONTS="$RES/Fonts"
 LICENSES="$RES/LICENSES"
-BASE=https://github.com/google/fonts/raw/main/ofl
+# google/fonts commit pinned so a re-fetch reproduces the committed files; bump deliberately.
+FONTS_SHA=47d54ca1ebb14fd864695f1d39dc734f39017c33
+BASE=https://github.com/google/fonts/raw/$FONTS_SHA/ofl
 mkdir -p "$FONTS" "$LICENSES"
 
 fetch() { curl -fsSL --retry 3 -o "$2" "$1"; echo "fetched $2"; }

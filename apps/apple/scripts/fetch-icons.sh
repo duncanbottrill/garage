@@ -6,13 +6,14 @@ cd "$(dirname "$0")/.."
 RES=GarageKit/Sources/GarageKit/Resources
 CATALOG="$RES/Icons.xcassets"
 LICENSES="$RES/LICENSES"
-BASE=https://unpkg.com/lucide-static@latest
+# Pinned so a re-fetch reproduces the committed assets; bump deliberately.
+LUCIDE_VERSION=1.60.0
+BASE=https://unpkg.com/lucide-static@$LUCIDE_VERSION
 ICONS=(lock lock-open thermometer snowflake flame battery-charging plug plug-zap car-front navigation map-pin fan wind
        zap clock refresh-cw settings chevron-right circle-alert wifi-off check x sun moon gauge route)
 mkdir -p "$CATALOG" "$LICENSES"
 
-VERSION=$(curl -fsSL --retry 3 "$BASE/package.json" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1)
-echo "lucide-static $VERSION"
+echo "lucide-static $LUCIDE_VERSION"
 
 cat > "$CATALOG/Contents.json" <<JSON
 {
@@ -43,4 +44,4 @@ JSON
 done
 
 curl -fsSL --retry 3 -o "$LICENSES/Lucide-LICENSE.txt" "$BASE/LICENSE"
-printf 'lucide-static %s\n' "$VERSION" > "$LICENSES/Lucide-VERSION.txt"
+printf 'lucide-static %s\n' "$LUCIDE_VERSION" > "$LICENSES/Lucide-VERSION.txt"
