@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Public values only: the Supabase publishable key is safe to ship. Never put secrets here. -->
+<plist version="1.0">
+<dict>
+	<key>SUPABASE_URL</key>
+	<string>https://mfxnhehffsuzaxjivvwr.supabase.co</string>
+	<key>SUPABASE_PUBLISHABLE_KEY</key>
+	<string>sb_publishable_pTtfxdLeqJjs43C-VtdTEw_75Ag3k9r</string>
+	<key>API_BASE_URL</key>
+	<string>https://garage.duncanbottrill.com</string>
+</dict>
+</plist>

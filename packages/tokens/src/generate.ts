@@ -26,7 +26,7 @@ export function generateSwift(t: Tokens): string {
   out.push("  }", "  public enum Radius {"); for (const [k, v] of Object.entries(t.radius)) out.push(`    public static let ${k}: CGFloat = ${v}`);
   out.push("  }", "  public enum Space {"); for (const [k, v] of Object.entries(t.space)) out.push(`    public static let ${k}: CGFloat = ${v}`);
   out.push("  }", "  public enum Blur {"); for (const [k, v] of Object.entries(t.blur)) out.push(`    public static let ${k}: CGFloat = ${v}`);
-  out.push("  }", "  public struct TextStyle { public let family: String; public let weight: Font.Weight; public let size: CGFloat; public let lineHeight: CGFloat; public let tracking: CGFloat }", "  public enum Typography {");
+  out.push("  }", "  public struct TextStyle: Sendable { public let family: String; public let weight: Font.Weight; public let size: CGFloat; public let lineHeight: CGFloat; public let tracking: CGFloat }", "  public enum Typography {");
   const w = (n: number) => (n >= 600 ? ".semibold" : n >= 500 ? ".medium" : ".regular");
   for (const [k, s] of Object.entries(t.type.scale)) { const role = (t.type as any)[s.role]; out.push(`    public static let ${k} = TextStyle(family: "${role.family}", weight: ${w(role.weight)}, size: ${s.size}, lineHeight: ${s.lineHeight}, tracking: ${s.tracking})`); }
   out.push("  }", "}", ""); return out.join("\n");
@@ -35,6 +35,11 @@ export function generateSwift(t: Tokens): string {
 if (process.argv[1]?.endsWith("generate.ts")) {
   mkdirSync(new URL("../dist/", import.meta.url), { recursive: true });
   writeFileSync(new URL("../dist/tokens.css", import.meta.url), generateCss(tokens));
-  writeFileSync(new URL("../dist/Tokens.swift", import.meta.url), generateSwift(tokens));
+  const swift = generateSwift(tokens);
+  writeFileSync(new URL("../dist/Tokens.swift", import.meta.url), swift);
+  // The Apple app compiles its own copy (committed) so Xcode builds never depend on a pnpm build.
+  const appleDir = new URL("../../../apps/apple/GarageKit/Sources/GarageKit/Design/", import.meta.url);
+  mkdirSync(appleDir, { recursive: true });
+  writeFileSync(new URL("Tokens.swift", appleDir), swift);
   console.log("tokens written");
 }

@@ -1,0 +1,53 @@
+name: Garage
+options:
+  bundleIdPrefix: com.duncanbottrill
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+  # Signing.xcconfig is git-ignored (copy Signing.xcconfig.example); generation must not fail on a fresh clone.
+  disabledValidations:
+    - missingConfigFiles
+packages:
+  GarageKit:
+    path: GarageKit
+targets:
+  Garage:
+    type: application
+    # One multiplatform SwiftUI target: native iPhone/iPad and native macOS (not Catalyst).
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - Garage
+    dependencies:
+      - package: GarageKit
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        CODE_SIGN_STYLE: Automatic
+        PRODUCT_BUNDLE_IDENTIFIER: com.duncanbottrill.garage
+        INFOPLIST_FILE: Garage/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Garage/Garage.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_HARDENED_RUNTIME: YES
+schemes:
+  Garage:
+    build:
+      targets:
+        Garage: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - package: GarageKit/GarageKitTests
+        - package: GarageKit/GarageKitSnapshotTests
+    archive:
+      config: Release
