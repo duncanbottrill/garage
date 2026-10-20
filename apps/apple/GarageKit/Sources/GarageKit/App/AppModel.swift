@@ -46,6 +46,10 @@ public final class AppModel {
     @ObservationIgnored private var more: MoreModel?
     /// Ends the Supabase session on this device (`signOut(scope: .local)`); injectable for tests.
     @ObservationIgnored private let endSession: @MainActor () async -> Void
+    /// Makes the vehicle store (at launch and after sign-out); injectable for tests.
+    @ObservationIgnored private let storeFactory: @MainActor () -> VehicleStore
+    /// The session proxy requests go through; nil for the command client's default.
+    @ObservationIgnored private let proxySession: URLSession?
 
     /// The app's model on the shared environment (`Config.plist`).
     public convenience init() {
@@ -60,21 +64,27 @@ public final class AppModel {
         self.init(environment: environment, defaults: defaults, cache: cache, checks: nil, endSession: nil)
     }
 
-    /// The designated init; tests replace the onboarding checks and the session ending.
+    /// The designated init; tests replace the onboarding checks, the session ending, the backend,
+    /// the vehicle store and the proxy's URL session.
     init(
         environment: SupabaseEnvironment,
         defaults: UserDefaults,
         cache: FileSnapshotCache,
         checks: OnboardingFlow.Checks?,
-        endSession: (@MainActor () async -> Void)?
+        endSession: (@MainActor () async -> Void)?,
+        api: GarageAPI? = nil,
+        makeStore: (@MainActor () -> VehicleStore)? = nil,
+        proxySession: URLSession? = nil
     ) {
         let owner = WeakModel()
         self.environment = environment
         self.defaults = defaults
         self.cache = cache
-        api = GarageAPI(environment: environment)
-        vehicleStore = Self.makeStore(environment: environment, cache: cache, defaults: defaults)
-        commandClient = Self.makeCommandClient(api: api, owner: owner)
+        self.api = api ?? GarageAPI(environment: environment)
+        storeFactory = makeStore ?? { Self.makeStore(environment: environment, cache: cache, defaults: defaults) }
+        self.proxySession = proxySession
+        vehicleStore = storeFactory()
+        commandClient = Self.makeCommandClient(api: self.api, owner: owner, session: proxySession)
         user = environment.client.auth.currentUser
         // A session and a finished onboarding on this device: open on Status (and its cached snapshot)
         // straight away; the first evaluation moves elsewhere only if something has changed.
@@ -136,9 +146,13 @@ public final class AppModel {
                 guard let monitor = self?.commandClient.reachabilityMonitor, let host = url.host(), !host.isEmpty else { return .unknown }
                 return await monitor.probe(host: host, port: UInt16(clamping: url.port ?? 443))
             },
-            defaults: defaults
+            defaults: defaults,
+            // Read live, so the Connection row turns red as soon as a send's token fetch fails.
+            tokenFailure: { [weak self] in self?.commandClient.tokenFailure }
         )
         more.onProxyOverrideChange = { [weak self] in self?.proxyOverrideChanged() }
+        // The billed read's answer is the newest row there is: show it without waiting for Realtime.
+        more.onRefreshed = { [weak self] in self?.vehicleStore.apply(state: $0) }
         return more
     }
 
@@ -156,10 +170,21 @@ public final class AppModel {
         await refresh()
     }
 
-    /// Re-runs the onboarding checks, then starts the proxy probe loop once onboarding is done.
+    /// Re-runs the onboarding checks, then, on Status, starts the proxy probe loop and the vehicle
+    /// store if it is not following the car yet (the launch check ran offline, so nothing started it).
+    /// The store needs only Supabase, so it is started even when a Garage backend check failed.
     public func refresh() async {
         await flow.evaluate()
         startMonitoringIfDone()
+        if flow.step == .done, !vehicleStore.isStarted {
+            await vehicleStore.start()
+        }
+    }
+
+    /// Call when the app goes to the background: writes the snapshot the store is holding back, so the
+    /// next cold start opens on the newest row.
+    public func didEnterBackground() {
+        vehicleStore.flushCache()
     }
 
     /// Handles a URL opened by the app (`onOpenURL`). `garage://connected` re-evaluates onboarding.
@@ -329,8 +354,8 @@ public final class AppModel {
         // Fresh instances: the store's in-memory state and the client's cached Tesla token go too.
         let owner = WeakModel()
         owner.model = self
-        vehicleStore = Self.makeStore(environment: environment, cache: cache, defaults: defaults)
-        commandClient = Self.makeCommandClient(api: api, owner: owner)
+        vehicleStore = storeFactory()
+        commandClient = Self.makeCommandClient(api: api, owner: owner, session: proxySession)
         user = nil
         flow.reset()
     }
@@ -344,9 +369,11 @@ public final class AppModel {
         )
     }
 
-    private static func makeCommandClient(api: GarageAPI, owner: WeakModel) -> CommandClient {
+    private static func makeCommandClient(api: GarageAPI, owner: WeakModel, session: URLSession?) -> CommandClient {
         // Read per send and per probe, so a newly published URL or a changed override is picked up.
-        CommandClient(api: api) { owner.model?.proxyBaseURL }
+        let proxyBaseURL: @MainActor () -> URL? = { owner.model?.proxyBaseURL }
+        guard let session else { return CommandClient(api: api, proxyBaseURL: proxyBaseURL) }
+        return CommandClient(proxyBaseURL: proxyBaseURL, tokens: TokenProvider(api: api), usage: UsageReporter(api: api), session: session)
     }
 
     private static func checks(owner: WeakModel) -> OnboardingFlow.Checks {

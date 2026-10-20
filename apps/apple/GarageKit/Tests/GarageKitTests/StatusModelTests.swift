@@ -260,3 +260,89 @@ import Testing
         #expect(lock.target == false)
     }
 }
+
+extension TrailLoaderTests {
+    /// Pruning runs on its own (a parked car gets no appends), dropping points past the window.
+    @MainActor @Test func pruneDropsOldPointsWithoutAppend() {
+        let loader = TrailLoader(fetcher: FakeFetcher(points: [], recorded: Recorder()))
+        loader.append(TrailPoint(latitude: 1, longitude: 0, recordedAt: now.addingTimeInterval(-25 * 60)), now: now)
+        loader.append(TrailPoint(latitude: 2, longitude: 0, recordedAt: now.addingTimeInterval(-5 * 60)), now: now)
+        #expect(loader.points.count == 2)
+
+        loader.prune(now: now.addingTimeInterval(10 * 60))
+        #expect(loader.points.map(\.latitude) == [2])
+        loader.prune(now: now.addingTimeInterval(40 * 60))
+        #expect(loader.points.isEmpty)
+        #expect(TrailLoader.pruneInterval == .seconds(60))
+    }
+
+    /// Points appended while the load was in flight are kept, merged in time order without duplicates.
+    @MainActor @Test func loadMergesPointsAppendedDuringFetch() async {
+        let fetched = [
+            TrailPoint(latitude: 1, longitude: 0, recordedAt: now.addingTimeInterval(-20 * 60)),
+            TrailPoint(latitude: 2, longitude: 0, recordedAt: now.addingTimeInterval(-10 * 60)),
+        ]
+        let gate = Gate()
+        let loader = TrailLoader(fetcher: GatedTrail(points: fetched, gate: gate))
+        let id = UUID()
+
+        let loading = Task { await loader.load(vehicleID: id, now: now) }
+        await gate.waitUntilEntered()
+        loader.append(TrailPoint(latitude: 3, longitude: 0, recordedAt: now.addingTimeInterval(-1 * 60)), now: now)
+        loader.append(TrailPoint(latitude: 2, longitude: 0, recordedAt: now.addingTimeInterval(-10 * 60)), now: now)
+        await gate.open()
+        await loading.value
+
+        #expect(loader.points.map(\.latitude) == [1, 2, 3])
+    }
+
+    private actor Gate {
+        private var entered = false
+        private var enterWaiters: [CheckedContinuation<Void, Never>] = []
+        private var openWaiters: [CheckedContinuation<Void, Never>] = []
+        private var isOpen = false
+
+        func enter() async {
+            entered = true
+            enterWaiters.forEach { $0.resume() }
+            enterWaiters = []
+            if isOpen { return }
+            await withCheckedContinuation { openWaiters.append($0) }
+        }
+
+        func waitUntilEntered() async {
+            if entered { return }
+            await withCheckedContinuation { enterWaiters.append($0) }
+        }
+
+        func open() {
+            isOpen = true
+            openWaiters.forEach { $0.resume() }
+            openWaiters = []
+        }
+    }
+
+    private struct GatedTrail: TrailFetching {
+        let points: [TrailPoint]
+        let gate: Gate
+        func locations(vehicleID: UUID, since: Date) async throws -> [TrailPoint] {
+            await gate.enter()
+            return points
+        }
+    }
+}
+
+@MainActor @Suite struct CarMapCameraTests {
+    /// The camera follows the car only on its first fix or after it moved more than 50 m, so a Mac
+    /// pan is not undone by every row.
+    @Test func recentresOnFirstFixOrAfter50m() {
+        let here = StatusModel.Coordinate(latitude: 51.5014, longitude: -0.1419)
+        #expect(CarMap.shouldRecentre(from: nil, to: here))
+        // ~33 m north.
+        #expect(!CarMap.shouldRecentre(from: here, to: .init(latitude: 51.5017, longitude: -0.1419)))
+        // ~78 m north.
+        #expect(CarMap.shouldRecentre(from: here, to: .init(latitude: 51.5021, longitude: -0.1419)))
+        #expect(CarMap.recentreDistance == 50)
+        #expect(CarMap.maximumCameraDistance == 50_000)
+    }
+}

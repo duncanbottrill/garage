@@ -18,6 +18,10 @@ import Synchronization
 ///   background; failures to report are logged by ``UsageReporter``, not surfaced.
 /// - Nothing here wakes the car on its own: ``CommandError/asleep`` goes back to the caller, which
 ///   asks the user before calling ``wake(vin:)``.
+/// - A failed token fetch is published as ``tokenFailure`` (More's Connection row turns red) until a
+///   send succeeds. It is never a reason to sign out.
+/// - The caller cancelling a send gets `CancellationError`; once a send has timed out or been
+///   cancelled, nothing more is posted for it, even if its token arrives later.
 @MainActor
 @Observable
 public final class CommandClient {
@@ -26,6 +30,10 @@ public final class CommandClient {
 
     /// Names of the commands in flight (``Command/name``, or `"wake_up"`), for pending markers in the UI.
     public private(set) var pending: Set<String> = []
+
+    /// The last token failure a send ran into (`/api/token` refused the session, is renewing, or has no
+    /// Tesla account), until a send succeeds; nil when the last token fetch worked.
+    public private(set) var tokenFailure: CommandError?
 
     /// The proxy's reachability, as last published by ``reachabilityMonitor``.
     public var reachability: ProxyReachability.State { reachabilityMonitor.state }
@@ -71,7 +79,7 @@ public final class CommandClient {
     ///
     /// - Returns: `true` when the command was sent and carried out; `false` when it was ignored because
     ///   the same command is already in flight.
-    /// - Throws: ``CommandError``, and nothing else.
+    /// - Throws: ``CommandError``, or `CancellationError` when the calling task is cancelled.
     @discardableResult
     public func send(_ command: Command, vin: String) async throws -> Bool {
         try await run(key: command.name, path: "api/1/vehicles/\(vin)/command/\(command.name)", body: command.body, kind: .command)
@@ -80,7 +88,7 @@ public final class CommandClient {
     /// Wakes the car (`wake_up`) and counts one wake. Call only after the user has confirmed: a wake is
     /// billed at 20× a command, and Garage never wakes the car on its own.
     /// - Returns: `false` when a wake is already in flight (nothing sent), `true` otherwise.
-    /// - Throws: ``CommandError``, and nothing else.
+    /// - Throws: ``CommandError``, or `CancellationError` when the calling task is cancelled.
     @discardableResult
     public func wake(vin: String) async throws -> Bool {
         try await run(key: "wake_up", path: "api/1/vehicles/\(vin)/wake_up", body: [:], kind: .wake)
@@ -104,11 +112,17 @@ public final class CommandClient {
         )
         do {
             try await exchange.run()
+        } catch let failure as ProxyExchange.TokenFailure {
+            if failure.marksConnection { tokenFailure = failure.error }
+            throw failure.error
         } catch let error as CommandError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw CommandError.rejected(reason: "Unexpected error: \(error.localizedDescription)")
         }
+        tokenFailure = nil
         usage.record(kind == .wake ? .wakes : .commands)
         return true
     }
@@ -124,6 +138,20 @@ public final class CommandClient {
 /// Runs off the main actor.
 struct ProxyExchange: Sendable {
     enum Kind: Sendable { case command, wake }
+
+    /// A ``CommandError`` that came from fetching the Tesla token, not from the proxy.
+    struct TokenFailure: Error {
+        let error: CommandError
+
+        /// Whether it says something about the Tesla connection (More's red row). No internet, a spent
+        /// budget or a timeout are reported elsewhere.
+        var marksConnection: Bool {
+            switch error {
+            case .unreachable, .budgetBlocked, .timeout: false
+            default: true
+            }
+        }
+    }
 
     static let unexpectedResponse = "Proxy returned an unexpected response"
 
@@ -219,7 +247,20 @@ struct ProxyExchange: Sendable {
         try Self.interpret(status: status, data: data, kind: kind)
     }
 
+    /// The token, or a ``TokenFailure``. Checks for cancellation after the fetch: a token that arrives
+    /// after the send timed out (the fetch is shared and cannot be cancelled) must not be used.
     private func token(forceRefresh: Bool) async throws -> String {
+        let token: String
+        do {
+            token = try await fetchToken(forceRefresh: forceRefresh)
+        } catch let error as CommandError {
+            throw TokenFailure(error: error)
+        }
+        try Task.checkCancellation()
+        return token
+    }
+
+    private func fetchToken(forceRefresh: Bool) async throws -> String {
         do {
             return try await tokens.current(forceRefresh: forceRefresh)
         } catch let error as APIError {
@@ -246,6 +287,7 @@ struct ProxyExchange: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
+        try Task.checkCancellation()
         do {
             let (data, response) = try await session.data(for: request)
             return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)

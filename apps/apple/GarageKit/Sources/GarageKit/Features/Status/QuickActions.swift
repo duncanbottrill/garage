@@ -30,11 +30,33 @@ struct QuickActions: View {
         .opacity(enabled ? 1 : 0.5)
     }
 
+    /// The lock pill's longer label. Each candidate row is measured with it, so the row picks the same
+    /// style for Lock and Unlock and never changes layout when the car locks.
+    static let widestLockLabel = "Unlock"
+
+    private var lockLabel: String { lockState == .locked ? "Unlock" : "Lock" }
+
+    /// A candidate row as wide as its widest-label version: the visible row is laid out in that width
+    /// (its pills fill it either way), and `ViewThatFits` compares the widest version.
+    @ViewBuilder
     private func row(_ style: QuickActionPill.Style) -> some View {
+        if lockLabel == Self.widestLockLabel {
+            row(style, lockLabel: lockLabel)
+        } else {
+            ZStack {
+                row(style, lockLabel: Self.widestLockLabel)
+                    .hidden()
+                    .accessibilityHidden(true)
+                row(style, lockLabel: lockLabel)
+            }
+        }
+    }
+
+    private func row(_ style: QuickActionPill.Style, lockLabel: String) -> some View {
         HStack(spacing: Tokens.Space.s) {
             QuickActionPill(
                 iconName: lockState == .unlocked ? .lockOpen : .lock,
-                label: lockState == .locked ? "Unlock" : "Lock",
+                label: lockLabel,
                 style: style,
                 isPending: pending.contains(Command.doorLock.name) || pending.contains(Command.doorUnlock.name),
                 action: actions.toggleLock

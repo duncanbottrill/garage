@@ -183,7 +183,9 @@ public final class MoreModel {
     // MARK: Inputs
 
     /// The car's latest row (bridge health, freshness for "Refresh now").
-    public var state: VehicleState?
+    public var state: VehicleState? {
+        didSet { trackHeartbeat() }
+    }
     /// The car (budget mode, published proxy URL, id for the refresh).
     public var vehicle: Vehicle?
     /// The live proxy probe's last result (Tailscale row).
@@ -207,13 +209,26 @@ public final class MoreModel {
     public let appVersion: AppVersion
     /// Called after the override is saved or cleared, so the live command client re-probes.
     @ObservationIgnored public var onProxyOverrideChange: (@MainActor () -> Void)?
+    /// Called with the row a successful "Refresh now" read returned, so the store shows it at once.
+    @ObservationIgnored public var onRefreshed: (@MainActor (VehicleState) -> Void)?
 
     @ObservationIgnored private let api: API
     @ObservationIgnored private let probe: @MainActor (URL) async -> ProxyReachability.State
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let now: @MainActor () -> Date
+    @ObservationIgnored private let tokenFailure: @MainActor () -> CommandError?
     /// Bumped on every override change, so ``effectiveProxyURL`` (read from defaults) is observed.
     private var overrideRevision = 0
+    /// The bridge's last heartbeat seen in this session: check-in time and counters.
+    @ObservationIgnored private var lastHeartbeat: Heartbeat?
+    /// The dropped or patch-failure count rose between the last two heartbeats.
+    private var bridgeCountsRose = false
+
+    private struct Heartbeat: Equatable {
+        var seenAt: Date
+        var dropped: Int
+        var failures: Int
+    }
 
     /// - Parameters:
     ///   - api: The connection and refresh calls.
@@ -221,18 +236,22 @@ public final class MoreModel {
     ///   - defaults: Where the proxy override lives (``ProxyOverride/key``).
     ///   - now: The clock for "rotated 2 h ago", the bridge window and the refresh rule.
     ///   - appVersion: The version shown in About.
+    ///   - tokenFailure: The command client's last token failure (``CommandClient/tokenFailure``),
+    ///     read whenever the rows are; it turns the Connection row red.
     public init(
         api: API,
         probe: @escaping @MainActor (URL) async -> ProxyReachability.State,
         defaults: UserDefaults = .standard,
         now: @escaping @MainActor () -> Date = { Date() },
-        appVersion: AppVersion = .main
+        appVersion: AppVersion = .main,
+        tokenFailure: @escaping @MainActor () -> CommandError? = { nil }
     ) {
         self.api = api
         self.probe = probe
         self.defaults = defaults
         self.now = now
         self.appVersion = appVersion
+        self.tokenFailure = tokenFailure
     }
 
     // MARK: Connection
@@ -247,10 +266,28 @@ public final class MoreModel {
         }
     }
 
-    /// Offer "Reconnect Tesla": the last rotation failed, or no Tesla account is connected.
+    /// Offer "Reconnect Tesla": the last rotation failed, or no Tesla account is connected (per
+    /// `/api/connection`, or because a send found no Tesla token).
     public var showsReconnect: Bool {
+        if tokenFailure() == .unauthorized { return true }
         guard let connection else { return false }
         return !connection.connected || connection.lastError != nil
+    }
+
+    /// The Connection row's detail for a token failure.
+    public static func tokenFailureDetail(_ failure: CommandError) -> String {
+        switch failure {
+        case let .tokenUnavailable(retryAt?):
+            "Renewing Tesla access · try again after \(CommandError.clockTime(retryAt))"
+        case .tokenUnavailable(nil):
+            "Renewing Tesla access · commands paused"
+        case .sessionExpired:
+            "The Tesla token was refused for this sign-in · sign out and in again"
+        case .unauthorized:
+            "No Tesla token · reconnect Tesla"
+        default:
+            "Garage couldn't get a Tesla token · try again later"
+        }
     }
 
     // MARK: Refresh now
@@ -266,8 +303,9 @@ public final class MoreModel {
         guard let id = vehicle?.id, refreshPhase != .refreshing else { return }
         refreshPhase = .refreshing
         do {
-            _ = try await api.refreshVehicleData(id)
+            let refreshed = try await api.refreshVehicleData(id)
             refreshPhase = .succeeded(now())
+            onRefreshed?(refreshed)
         } catch APIError.asleep {
             refreshPhase = .failed("The car is asleep")
         } catch APIError.budgetMinimal {
@@ -369,11 +407,13 @@ public final class MoreModel {
         let make = { (detail: String, tone: Row.Tone) in
             Row(id: .connection, icon: .key, title: "Connection", detail: detail, tone: tone)
         }
+        if let lastError = connection?.lastError { return make(lastError, .failed) }
+        if connection?.connected == false { return make("Not connected to Tesla", .failed) }
+        // A send could not get a Tesla token: red, whatever the last health check said.
+        if let failure = tokenFailure() { return make(Self.tokenFailureDetail(failure), .failed) }
         guard let connection else {
             return connectionError.map { make($0, .warning) } ?? make("Checking…", .neutral)
         }
-        if let lastError = connection.lastError { return make(lastError, .failed) }
-        guard connection.connected else { return make("Not connected to Tesla", .failed) }
         if connection.rotating { return make("Connected · rotating token", .healthy) }
         guard let rotated = connection.rotatedAt else { return make("Connected", .healthy) }
         return make("Connected · token rotated \(Self.ago(rotated, now: at))", .healthy)
@@ -396,7 +436,23 @@ public final class MoreModel {
 
         guard Freshness.bridge(seenAt: seen, now: at) else { return make(detail, .failed) }
         let carConnected = health?.connectivity.map { $0.uppercased() == "CONNECTED" } ?? true
-        return make(detail, carConnected && failures == 0 ? .healthy : .warning)
+        // The counters are totals since the bridge started: only a rise is news.
+        return make(detail, carConnected && !bridgeCountsRose ? .healthy : .warning)
+    }
+
+    /// Compares each new heartbeat (a new check-in time or new counters) with the previous one seen in
+    /// this session. The first one seen has nothing to compare with, so old totals read green.
+    private func trackHeartbeat() {
+        guard let seen = state?.bridgeSeenAt else { return }
+        let health = state?.bridgeHealth
+        let beat = Heartbeat(seenAt: seen, dropped: health?.dropped ?? 0, failures: health?.patchFailures ?? 0)
+        guard beat != lastHeartbeat else { return }
+        if let last = lastHeartbeat {
+            bridgeCountsRose = beat.dropped > last.dropped || beat.failures > last.failures
+        } else {
+            bridgeCountsRose = false
+        }
+        lastHeartbeat = beat
     }
 
     private var budgetRow: Row {

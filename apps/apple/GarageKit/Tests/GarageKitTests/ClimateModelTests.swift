@@ -211,3 +211,41 @@ import Testing
         #expect(car.sentAt[0] - lastChange >= quiet)
     }
 }
+
+extension ClimateModelTests {
+    /// In °F each step is one whole degree on screen, stored as the nearest 0.5 °C, so the display
+    /// never repeats or skips a number across 59–82 °F (15–28 °C).
+    @Test func fahrenheitStepsWholeDegrees() {
+        let car = FakeCar()
+        let model = ClimateModel(send: car.send, wake: car.wake, locale: Locale(identifier: "en_US"), debounce: .seconds(60))
+        model.reachability = .reachable
+        model.setTarget(15)
+        #expect(model.targetText == "59°")
+
+        var shown = [model.targetText]
+        for _ in 0..<40 {
+            model.increaseTarget()
+            if model.targetText != shown.last { shown.append(model.targetText) }
+            #expect(model.targetC.truncatingRemainder(dividingBy: 0.5) == 0, "stored on the 0.5 °C grid")
+        }
+        #expect(shown == (59...82).map { "\($0)°" })
+        #expect(model.targetC == 28)
+
+        var down = [model.targetText]
+        for _ in 0..<40 {
+            model.decreaseTarget()
+            if model.targetText != down.last { down.append(model.targetText) }
+        }
+        #expect(down == (59...82).reversed().map { "\($0)°" })
+        #expect(model.targetC == 15)
+
+        // Every step changes the number by exactly one.
+        model.setTarget(21) // 69.8 °F
+        #expect(model.targetText == "70°")
+        model.increaseTarget()
+        #expect(model.targetText == "71°")
+        model.decreaseTarget()
+        model.decreaseTarget()
+        #expect(model.targetText == "69°")
+    }
+}

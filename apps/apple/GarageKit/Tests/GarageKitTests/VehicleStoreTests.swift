@@ -223,3 +223,294 @@ private func waitUntil(timeout: Duration = .seconds(2), _ condition: () -> Bool)
         #expect(feed.terminated == 2)
     }
 }
+
+/// A feed whose every stream plays the next script: some events, then either staying open (like a
+/// live channel) or finishing (the channel closed for good). Streams past the last script stay silent.
+private final class ScriptedFeed: RealtimeFeed, @unchecked Sendable {
+    enum Script {
+        case open([RealtimeFeedEvent])
+        case finish([RealtimeFeedEvent])
+    }
+
+    private let lock = NSLock()
+    private var scripts: [Script]
+    private var _opened = 0
+    private var _terminated = 0
+    private var continuations: [AsyncStream<RealtimeFeedEvent>.Continuation] = []
+    var opened: Int { lock.withLock { _opened } }
+    var terminated: Int { lock.withLock { _terminated } }
+
+    init(_ scripts: [Script]) {
+        self.scripts = scripts
+    }
+
+    /// Sends `event` on the newest stream.
+    func emit(_ event: RealtimeFeedEvent) {
+        _ = lock.withLock { continuations.last }?.yield(event)
+    }
+
+    func events(for vehicleID: UUID) -> AsyncStream<RealtimeFeedEvent> {
+        let script: Script? = lock.withLock {
+            _opened += 1
+            return scripts.isEmpty ? nil : scripts.removeFirst()
+        }
+        return AsyncStream { continuation in
+            lock.withLock { continuations.append(continuation) }
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                self.lock.withLock { self._terminated += 1 }
+            }
+            switch script {
+            case let .open(events)?:
+                events.forEach { continuation.yield($0) }
+            case let .finish(events)?:
+                events.forEach { continuation.yield($0) }
+                continuation.finish()
+            case nil:
+                break
+            }
+        }
+    }
+}
+
+/// Sleeps 20 ms instead of the requested delay (long enough for a stream's queued events to be
+/// handled first) and records the delays that ran to the end, not those cancelled.
+private final class RecordingSleeper: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _delays: [Duration] = []
+    var delays: [Duration] { lock.withLock { _delays } }
+
+    var sleep: @Sendable (Duration) async throws -> Void {
+        { [self] duration in
+            try await Task.sleep(for: .milliseconds(20))
+            lock.withLock { _delays.append(duration) }
+        }
+    }
+}
+
+/// A snapshot cache that counts its writes.
+private final class CountingCache: SnapshotCache, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: VehicleState?
+    private var _saves = 0
+    var saves: Int { lock.withLock { _saves } }
+
+    func load() -> VehicleState? { lock.withLock { stored } }
+
+    func save(_ state: VehicleState) {
+        lock.withLock {
+            stored = state
+            _saves += 1
+        }
+    }
+}
+
+/// A clock the test moves by hand.
+private final class ManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _now = ContinuousClock.now
+    var now: @Sendable () -> ContinuousClock.Instant { { [self] in lock.withLock { _now } } }
+    func advance(_ duration: Duration) { lock.withLock { _now = _now.advanced(by: duration) } }
+}
+
+/// A sleeper that never returns before it is cancelled.
+private let sleepForever: @Sendable (Duration) async throws -> Void = { _ in try await Task.sleep(for: .seconds(3600)) }
+
+extension VehicleStoreTests {
+    /// The channel closes while the store is started and the client does not rejoin it: the store
+    /// re-subscribes after 2 s, then 4 s while the new channel stays down, and starts again at 2 s
+    /// once a channel has joined. Every replaced stream is torn down.
+    @Test func resubscribesWithBackoffAfterChannelCloses() async throws {
+        let feed = ScriptedFeed([
+            .open([.subscribed, .disconnected]),
+            .open([]),
+            .open([.subscribed, .disconnected]),
+            .open([.subscribed]),
+        ])
+        let sleeper = RecordingSleeper()
+        let fetcher = FakeFetcher(vehicle: testVehicle, state: try Fixture.state("vehicle_state_sparse"))
+        let store = VehicleStore(feed: feed, fetcher: fetcher, cache: InMemorySnapshotCache(), sleep: sleeper.sleep)
+
+        await store.start()
+        await waitUntil { feed.opened == 4 && store.isLive }
+
+        #expect(feed.opened == 4)
+        #expect(sleeper.delays == [.seconds(2), .seconds(4), .seconds(2)])
+        #expect(feed.terminated == 3)
+        #expect(store.isLive)
+        #expect(fetcher.stateCalls >= 2, "the row is fetched again after rejoining")
+        store.stop()
+        await waitUntil { feed.terminated == 4 }
+        #expect(feed.terminated == 4)
+    }
+
+    /// A stream that ends on its own (the channel is gone) is replaced too.
+    @Test func resubscribesWhenStreamEnds() async throws {
+        let feed = ScriptedFeed([.finish([.subscribed]), .open([.subscribed])])
+        let sleeper = RecordingSleeper()
+        let store = VehicleStore(feed: feed, fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: InMemorySnapshotCache(), sleep: sleeper.sleep)
+
+        await store.start()
+        await waitUntil { feed.opened == 2 && store.isLive }
+
+        #expect(feed.opened == 2)
+        #expect(sleeper.delays == [.seconds(2)])
+        #expect(store.isLive)
+        store.stop()
+    }
+
+    /// The client rejoining by itself inside the delay keeps the channel: nothing is re-opened.
+    @Test func keepsChannelThatRejoinsInTime() async throws {
+        let feed = ScriptedFeed([.open([.subscribed])])
+        let store = VehicleStore(feed: feed, fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: InMemorySnapshotCache(), sleep: { _ in
+            try await Task.sleep(for: .milliseconds(100))
+        })
+
+        await store.start()
+        await waitUntil { store.isLive }
+        feed.emit(.disconnected)
+        await waitUntil { !store.isLive }
+        feed.emit(.subscribed)
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(feed.opened == 1)
+        #expect(store.isLive)
+        store.stop()
+    }
+
+    /// Delays double from 2 s and stay at 60 s.
+    @Test func resubscribeDelaysCapAtOneMinute() {
+        let delays = (0..<8).map(VehicleStore.resubscribeDelay(attempt:))
+        #expect(delays == [.seconds(2), .seconds(4), .seconds(8), .seconds(16), .seconds(32), .seconds(60), .seconds(60), .seconds(60)])
+    }
+
+    /// While live, Realtime rows reach the cache at most once per 5 s; the latest pending row is
+    /// written on `stop()`, and a row after the window is written at once.
+    @Test func coalescesCacheWritesWhileLive() async throws {
+        let cache = CountingCache()
+        let clock = ManualClock()
+        let feed = ScriptedFeed([.open([.subscribed])])
+        let store = VehicleStore(feed: feed, fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: cache, sleep: sleepForever, now: clock.now)
+        await store.start()
+        await waitUntil { store.isLive }
+        var row = try Fixture.row("vehicle_state_live")
+
+        store.apply(row: row)
+        #expect(cache.saves == 1, "the first live row is written at once")
+        for soc in [40.0, 41, 42] {
+            clock.advance(.seconds(1))
+            row["soc"] = .double(soc)
+            store.apply(row: row)
+        }
+        #expect(store.state?.soc == 42)
+        #expect(cache.saves == 1, "rows inside the window wait")
+
+        clock.advance(.seconds(5))
+        row["soc"] = .double(43)
+        store.apply(row: row)
+        #expect(cache.saves == 2, "past the window: written at once")
+        #expect(cache.load()?.soc == 43)
+
+        clock.advance(.seconds(1))
+        row["soc"] = .double(44)
+        store.apply(row: row)
+        #expect(cache.saves == 2)
+        store.stop()
+        #expect(cache.saves == 3, "stop() flushes the pending row")
+        #expect(cache.load()?.soc == 44)
+        store.stop()
+        #expect(cache.saves == 3, "nothing left to flush")
+    }
+
+    /// A pending row is written when the window ends, and on `flushCache()` (the app going to the background).
+    @Test func flushesPendingRowAfterWindowAndOnDemand() async throws {
+        let cache = CountingCache()
+        let clock = ManualClock()
+        let feed = ScriptedFeed([.open([.subscribed])])
+        let store = VehicleStore(feed: feed, fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: cache, sleep: { _ in
+            try await Task.sleep(for: .milliseconds(50))
+        }, now: clock.now)
+        await store.start()
+        await waitUntil { store.isLive }
+        var row = try Fixture.row("vehicle_state_live")
+        store.apply(row: row)
+        row["soc"] = .double(50)
+        store.apply(row: row)
+        #expect(cache.saves == 1)
+        await waitUntil { cache.saves == 2 }
+        #expect(cache.saves == 2, "the window's timer writes the pending row")
+        #expect(cache.load()?.soc == 50)
+
+        clock.advance(.seconds(1))
+        row["soc"] = .double(51)
+        store.apply(row: row)
+        store.flushCache()
+        #expect(cache.saves == 3)
+        #expect(cache.load()?.soc == 51)
+        store.stop()
+    }
+
+    /// A store released without `stop()` still writes its pending row and closes its feed.
+    @Test func deinitFlushesAndCancels() async throws {
+        let cache = CountingCache()
+        let clock = ManualClock()
+        let feed = ScriptedFeed([.open([.subscribed])])
+        var store: VehicleStore? = VehicleStore(feed: feed, fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: cache, sleep: sleepForever, now: clock.now)
+        await store?.start()
+        await waitUntil { store?.isLive == true }
+        var row = try Fixture.row("vehicle_state_live")
+        store?.apply(row: row)
+        row["soc"] = .double(60)
+        store?.apply(row: row)
+        #expect(cache.saves == 1)
+
+        store = nil
+        await waitUntil { cache.saves == 2 && feed.terminated == 1 }
+        #expect(cache.saves == 2)
+        #expect(cache.load()?.soc == 60)
+        #expect(feed.terminated == 1)
+    }
+
+    /// "Refresh now" hands back a full row: it is adopted unless it is older or another car's.
+    @Test func applyStateMergesRefreshedRow() async throws {
+        let cache = CountingCache()
+        let store = VehicleStore(feed: IdleFeed(), fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: cache)
+        await store.start()
+        var refreshed = try Fixture.state("vehicle_state_live")
+        store.apply(state: refreshed)
+        #expect(store.state == refreshed)
+        #expect(cache.load() == refreshed)
+
+        var older = refreshed
+        older.soc = 10
+        older.updatedAt = refreshed.updatedAt?.addingTimeInterval(-60)
+        store.apply(state: older)
+        #expect(store.state?.soc == refreshed.soc)
+
+        var other = refreshed
+        other.vehicleId = UUID()
+        other.updatedAt = refreshed.updatedAt?.addingTimeInterval(60)
+        store.apply(state: other)
+        #expect(store.state?.vehicleId == vehicleID)
+
+        refreshed.soc = 70
+        refreshed.updatedAt = refreshed.updatedAt?.addingTimeInterval(60)
+        store.apply(state: refreshed)
+        #expect(store.state?.soc == 70)
+        store.stop()
+    }
+
+    /// `isStarted` is true from a `start()` that found the car until `stop()`.
+    @Test func isStartedFollowsStartAndStop() async throws {
+        let store = VehicleStore(feed: IdleFeed(), fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: InMemorySnapshotCache())
+        #expect(!store.isStarted)
+        await store.start()
+        #expect(store.isStarted)
+        store.stop()
+        #expect(!store.isStarted)
+
+        let empty = VehicleStore(feed: IdleFeed(), fetcher: FakeFetcher(vehicle: nil, state: nil), cache: InMemorySnapshotCache())
+        await empty.start()
+        #expect(!empty.isStarted, "no car: nothing to follow")
+    }
+}

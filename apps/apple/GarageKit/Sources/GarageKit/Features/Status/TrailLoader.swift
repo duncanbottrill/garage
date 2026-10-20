@@ -88,6 +88,8 @@ public struct SupabaseTrailFetcher: TrailFetching {
 public final class TrailLoader {
     /// How far back the trail reaches.
     public static let window: TimeInterval = 30 * 60
+    /// How often Status calls ``prune(now:)`` while it is on screen.
+    public static let pruneInterval: Duration = .seconds(60)
 
     /// The trail, oldest first, all within ``window`` of the last load or append.
     public private(set) var points: [TrailPoint] = []
@@ -99,12 +101,24 @@ public final class TrailLoader {
         self.fetcher = fetcher
     }
 
-    /// Replaces the trail with the signals of the last ``window`` before `now`. A failed fetch keeps
-    /// the current trail (the map is decoration; nothing to report).
+    /// Replaces the trail with the signals of the last ``window`` before `now`, keeping any live
+    /// positions appended while the fetch was in flight (merged by time, one point per timestamp). A
+    /// failed fetch keeps the current trail (the map is decoration; nothing to report).
     public func load(vehicleID: UUID, now: Date = Date()) async {
         let since = now.addingTimeInterval(-Self.window)
         guard let fetched = try? await fetcher.locations(vehicleID: vehicleID, since: since) else { return }
-        points = fetched.filter { $0.recordedAt > since }.sorted { $0.recordedAt < $1.recordedAt }
+        var byTime: [Date: TrailPoint] = [:]
+        for point in fetched + points where point.recordedAt > since {
+            byTime[point.recordedAt] = byTime[point.recordedAt] ?? point
+        }
+        points = byTime.values.sorted { $0.recordedAt < $1.recordedAt }
+    }
+
+    /// Drops points older than ``window`` before `now`.
+    public func prune(now: Date = Date()) {
+        let since = now.addingTimeInterval(-Self.window)
+        guard points.first.map({ $0.recordedAt <= since }) == true else { return }
+        points.removeAll { $0.recordedAt <= since }
     }
 
     /// Adds a live position (ignoring one no newer than the last point) and drops points older than ``window``.

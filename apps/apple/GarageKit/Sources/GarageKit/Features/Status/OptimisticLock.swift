@@ -57,6 +57,23 @@ final class OptimisticLock {
         if current?.id == intent.id { clear() }
     }
 
+    /// One Lock/Unlock tap: flips the overlay to `target` at once, runs the command through `runner`
+    /// (which may ask to wake the car first) and reverts unless it was sent; a sent one then waits for
+    /// the row, as ``sent(_:rowLocked:)``. The runner's toast says why a command failed.
+    /// - Returns: How the command ended, or nil when an earlier tap is still unsent (nothing ran).
+    @discardableResult
+    func toggle(to target: Bool, with runner: CommandRunner, rowLocked: @MainActor () -> Bool?) async -> CommandRunner.Outcome? {
+        guard let intent = begin(target: target) else { return nil }
+        let outcome = await runner.run(target ? .doorLock : .doorUnlock)
+        if outcome == .sent {
+            await sent(intent, rowLocked: rowLocked())
+        } else {
+            // Failed (the toast says why), declined at the wake prompt, or already in flight.
+            failed(intent)
+        }
+        return outcome
+    }
+
     /// A new row: drops a sent intent the row now agrees with.
     func rowChanged(locked: Bool?) {
         guard let current, current.sent, locked == current.target else { return }

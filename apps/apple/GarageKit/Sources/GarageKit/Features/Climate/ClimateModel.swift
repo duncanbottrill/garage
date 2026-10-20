@@ -6,7 +6,9 @@ import Observation
 ///
 /// - On/off sends `auto_conditioning_start`/`stop` and shows its target at once (reverting on error).
 /// - The target steps 15–28 °C by 0.5 and sends one `set_temps` (driver and passenger the same)
-///   ``debounce`` after the last step; a step while one is in flight is sent after it.
+///   ``debounce`` after the last step; a step while one is in flight is sent after it. In °F a step
+///   is one whole degree on screen, stored as the nearest 0.5 °C (always within 0.45 °F of it, so
+///   the number shown never repeats or skips).
 /// - Seat heaters send `remote_seat_heater_request {heater, level}` (0–3) per seat, latest level wins.
 /// - Defrost sends `set_preconditioning_max {on, manual_override: true}`.
 ///
@@ -99,7 +101,9 @@ public final class ClimateModel {
     public var temperatureUnit: String { usesFahrenheit ? "°F" : "°C" }
     /// The target as shown: "21.0°" (°C, one decimal) or "70°" (°F, whole degrees).
     public var targetText: String {
-        let value = Units.temperature(c: targetC, locale: locale).value
+        var value = Units.temperature(c: targetC, locale: locale).value
+        // Rounded the way the °F stepper reads it back, so the shown number and the next step agree.
+        if usesFahrenheit { value.round() }
         let digits = usesFahrenheit ? 0 : 1
         return value.formatted(.number.precision(.fractionLength(digits)).locale(Locale(identifier: "en_US_POSIX"))) + "°"
     }
@@ -139,10 +143,20 @@ public final class ClimateModel {
         }
     }
 
-    /// One step warmer.
-    public func increaseTarget() { setTarget(targetC + Self.targetStep) }
-    /// One step cooler.
-    public func decreaseTarget() { setTarget(targetC - Self.targetStep) }
+    /// One step warmer: 0.5 °C, or 1 °F as shown.
+    public func increaseTarget() { step(by: 1) }
+    /// One step cooler: 0.5 °C, or 1 °F as shown.
+    public func decreaseTarget() { step(by: -1) }
+
+    private func step(by direction: Double) {
+        guard usesFahrenheit else {
+            setTarget(targetC + direction * Self.targetStep)
+            return
+        }
+        let shown = Units.temperature(c: targetC, locale: locale).value.rounded()
+        let next = Measurement(value: shown + direction, unit: UnitTemperature.fahrenheit).converted(to: .celsius).value
+        setTarget(next)
+    }
 
     /// Sets the target (rounded to 0.5, clamped to 15–28 °C) and sends it after the quiet time.
     public func setTarget(_ celsius: Double) {

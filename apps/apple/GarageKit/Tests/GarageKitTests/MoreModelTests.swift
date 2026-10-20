@@ -215,3 +215,89 @@ extension MoreModelTests {
 private func freshDefaults() -> UserDefaults {
     UserDefaults(suiteName: "MoreModelTests-\(UUID().uuidString)")!
 }
+
+extension MoreModelTests {
+    /// A heartbeat row: the bridge checked in `secondsAgo` before now, with these counters.
+    private func heartbeat(_ secondsAgo: TimeInterval, dropped: Int, failures: Int, connectivity: String = "CONNECTED") -> VehicleState {
+        var state = state(age: 20)
+        state.bridgeSeenAt = Self.now.addingTimeInterval(-secondsAgo)
+        state.bridgeHealth = BridgeHealth(dropped: dropped, connectivity: connectivity, patchFailures: failures)
+        return state
+    }
+
+    /// The bridge's counters are totals since it started, so only a rise since the previous heartbeat
+    /// seen in this session is amber; old totals, a steady count or a reset read green.
+    @Test func bridgeRowAmberOnlyWhenCountsRise() {
+        let model = makeModel(FakeBackend())
+
+        model.state = heartbeat(40, dropped: 3, failures: 2)
+        #expect(model.row(.bridge)?.tone == .healthy, "totals from before this session")
+        #expect(model.row(.bridge)?.detail.contains("3 dropped") == true)
+
+        model.state = heartbeat(30, dropped: 3, failures: 2)
+        #expect(model.row(.bridge)?.tone == .healthy, "no change since the last heartbeat")
+
+        model.state = heartbeat(20, dropped: 4, failures: 2)
+        #expect(model.row(.bridge)?.tone == .warning, "a drop since the last heartbeat")
+
+        // An unrelated row change (same heartbeat) keeps the reading.
+        var same = heartbeat(20, dropped: 4, failures: 2)
+        same.soc = 12
+        model.state = same
+        #expect(model.row(.bridge)?.tone == .warning)
+
+        model.state = heartbeat(10, dropped: 4, failures: 2)
+        #expect(model.row(.bridge)?.tone == .healthy, "steady again")
+
+        model.state = heartbeat(5, dropped: 4, failures: 3)
+        #expect(model.row(.bridge)?.tone == .warning, "a new patch failure")
+
+        model.state = heartbeat(1, dropped: 0, failures: 0)
+        #expect(model.row(.bridge)?.tone == .healthy, "the bridge restarted: counters reset")
+
+        // The car's telemetry link being down is still a warning on its own.
+        model.state = heartbeat(0, dropped: 0, failures: 0, connectivity: "DISCONNECTED")
+        #expect(model.row(.bridge)?.tone == .warning)
+    }
+
+    /// "Refresh now" hands its row to the store.
+    @Test func refreshNowMergesIntoStore() async {
+        let backend = FakeBackend()
+        let model = makeModel(backend)
+        model.state = state(age: 2 * 3600)
+        var merged: [VehicleState] = []
+        model.onRefreshed = { merged.append($0) }
+
+        await model.refreshNow()
+
+        #expect(merged == [VehicleState()])
+        #expect(model.refreshPhase == .succeeded(Self.now))
+
+        backend.refreshError = APIError.asleep
+        await model.refreshNow()
+        #expect(merged.count == 1, "a failed refresh merges nothing")
+    }
+
+    /// A token failure turns the Connection row red even when `/api/connection` says connected.
+    @Test func tokenFailureTurnsConnectionRowRed() async {
+        let backend = FakeBackend()
+        var failure: CommandError?
+        let model = MoreModel(api: backend.api, probe: { _ in .reachable }, defaults: freshDefaults(), now: { Self.now }, tokenFailure: { failure })
+        await model.loadConnection()
+        #expect(model.row(.connection)?.tone == .healthy)
+
+        failure = .tokenUnavailable(retryAt: nil)
+        #expect(model.row(.connection)?.tone == .failed)
+        #expect(model.row(.connection)?.detail == "Renewing Tesla access · commands paused")
+        #expect(!model.showsReconnect, "renewal recovers on its own")
+
+        failure = .sessionExpired
+        #expect(model.row(.connection)?.detail == MoreModel.tokenFailureDetail(.sessionExpired))
+
+        failure = .unauthorized
+        #expect(model.showsReconnect, "no Tesla token at all: reconnect")
+
+        failure = nil
+        #expect(model.row(.connection)?.tone == .healthy)
+    }
+}

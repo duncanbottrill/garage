@@ -341,3 +341,39 @@ private struct Rig {
         #expect(reachability.state == .unknown)
     }
 }
+
+extension CommandClientTests {
+    /// The caller giving up is a cancellation, not a rejected command.
+    @Test func callerCancellationRethrowsCancellationError() async {
+        let rig = Rig()
+        rig.proxy.on("POST", rig.commandPath("honk_horn")) { _ in .hang }
+
+        let send = Task { try await rig.client.send(.honkHorn, vin: Rig.vin) }
+        #expect(await eventually { rig.proxy.requests.count == 1 })
+        send.cancel()
+
+        await #expect(throws: CancellationError.self) { try await send.value }
+        #expect(rig.client.pending.isEmpty)
+        #expect(await rig.usageBodies().isEmpty)
+    }
+
+    /// A token that arrives after the send timed out must not send the command: the user was told it
+    /// did not go through.
+    @Test func lateTokenAfterTimeoutNeverPosts() async throws {
+        let rig = Rig(timeout: .milliseconds(150))
+        let (gate, open) = AsyncStream.makeStream(of: Void.self)
+        rig.backend.on("GET", "/api/token") { _ in
+            for await _ in gate { break }
+            return .json(200, #"{"access_token":"late","expires_at":"2099-01-01T00:00:00Z"}"#)
+        }
+        rig.onCommand("door_unlock", Rig.ok)
+
+        await #expect(throws: CommandError.timeout) { try await rig.client.send(.doorUnlock, vin: Rig.vin) }
+        open.yield()
+        open.finish()
+        try await Task.sleep(for: .milliseconds(400))
+
+        #expect(rig.proxy.requests.isEmpty, "the timed-out exchange posted after all")
+        #expect(await rig.usageBodies().isEmpty)
+    }
+}

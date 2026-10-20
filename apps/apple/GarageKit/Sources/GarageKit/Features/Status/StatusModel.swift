@@ -75,6 +75,9 @@ public struct StatusModel: Sendable, Equatable {
     public let chargePortText: String
     /// The bridge checked in within the last 90 s.
     public let bridgeOnline: Bool
+    /// The quick actions can send: false while the proxy is known to be unreachable (Tailscale off),
+    /// when the banner says so. Before the first probe (`.unknown`) they stay usable.
+    public let quickActionsEnabled: Bool
     /// The banner to show, or nil.
     public let banner: Banner?
     /// The banner's one line of copy, or nil.
@@ -157,6 +160,7 @@ public struct StatusModel: Sendable, Equatable {
         chargePortText = chargePortOpen.map { $0 ? "Open" : "Closed" } ?? dash
 
         bridgeOnline = Freshness.bridge(seenAt: state?.bridgeSeenAt, now: now)
+        quickActionsEnabled = reachability != .unreachable
         banner = Self.banner(state: state, bridgeOnline: bridgeOnline, vehicle: vehicle, reachability: reachability)
         bannerMessage = banner.map { Self.message(for: $0, timeZone: timeZone) }
 

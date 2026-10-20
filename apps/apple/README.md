@@ -26,6 +26,29 @@ The macOS build needs a Mac App Development provisioning profile (Sign in with A
 creates the first time with `-allowProvisioningUpdates` or by building once from Xcode. To check the code compiles
 without signing, add `CODE_SIGNING_ALLOWED=NO`.
 
+Run the tests through `xcodebuild` (add `-only-testing:GarageKitTests` or `-only-testing:GarageKitSnapshotTests` for
+one suite). Plain `swift test` in `GarageKit/` also runs the unit tests on the Mac, but SwiftPM does not compile the
+icon asset catalog there, so `IconsTests.iconIsBundledAsTemplate` fails under it and nowhere else.
+
+## Running on your devices
+
+1. **Signing.** `cp Signing.xcconfig.example Signing.xcconfig` and set `DEVELOPMENT_TEAM` to your team ID (the example
+   has the owner's). Keep `CODE_SIGN_STYLE = Automatic`. The file is git-ignored; never commit it.
+2. **Project.** `xcodegen generate`, then `open Garage.xcodeproj`. Regenerate after pulling changes to `project.yml`
+   or after adding files.
+3. **Team.** In Xcode, select the Garage target → Signing & Capabilities and check the team is the one from
+   `Signing.xcconfig`, with "Automatically manage signing" on.
+4. **First build.** Pick the iPhone (connected by cable or on the same network, Developer Mode on) and Run. The first
+   signed build registers the App ID `com.duncanbottrill.garage` with the Sign in with Apple capability and creates
+   the development profiles. Then pick "My Mac" and Run for the macOS app. If Xcode asks to register the device or
+   the App ID, accept.
+5. **Tailscale.** Install Tailscale on both the iPhone and the Mac and sign them in to the same tailnet as the bridge,
+   with MagicDNS on (the proxy URL is a `*.ts.net` name). Commands go to the bridge over the tailnet; Status and More
+   work without it.
+6. **Supabase.** The owner setup below must be done once: Apple provider with the bundle id in Client IDs, manual
+   linking on, email/password kept for the bootstrap account. Sign in with **Use email** first, then run More →
+   Link Apple ID.
+
 ## Pinned versions
 
 | Source | Pin |
@@ -83,3 +106,64 @@ without them; only real sign-in needs them.
   `garage://connected?ok=1` (or `?error=…`), which re-runs the onboarding checks.
 - Sign out is local to the device. It clears the snapshot cache (it holds the car's location), the chosen vehicle
   (`selectedVehicleID`) and the onboarding-completed flag.
+
+## Device verification checklist
+
+Run on the owner's iPhone and Mac, both on the tailnet, with the bridge running. Write the result (pass/fail, date,
+notes) in the last column; the same lines go in the plan's execution record.
+
+| # | Check | How | Result |
+| --- | --- | --- | --- |
+| 1 | Cold start from cache in under 3 s | Force-quit, turn on Airplane Mode, launch. Status shows the last numbers within 3 s. | |
+| 2 | Updates within 15 s while awake | With the car awake, change something on it (lock it from the Tesla app, open a window). Status shows it within 15 s. | |
+| 3 | Lock / unlock | On home Wi-Fi, then on cellular: Lock, then Unlock. The icon flips at once and the car follows. | |
+| 4 | Climate on/off and temperature | On Wi-Fi and cellular: Climate sheet → on, change the target, off. | |
+| 5 | Charge limit | On Wi-Fi and cellular: Charge sheet → move the limit. The car reports the new limit. | |
+| 6 | Charge port | On Wi-Fi and cellular: open, then close the port. | |
+| 7 | Frunk | On Wi-Fi and cellular: Frunk → confirm. The lid pops. | |
+| 8 | No wake without the prompt | With the car asleep, tap a command. The wake prompt appears; Cancel sends nothing (the car stays asleep, no wake in the usage ledger). | |
+| 9 | Mac split layout and commands | On the Mac: the sidebar and the Status panel beside the map; lock/unlock and climate from the Mac. | |
+| 10 | Bridge offline | Stop the bridge add-on for 2 min. Status shows "Telemetry paused since HH:mm" and the car becomes a solid dot (no halo). Start it again; both clear. | |
+| 11 | Tailscale off | Turn Tailscale off on the iPhone. Within 20 s (one probe) the "Connect Tailscale to control the car" banner shows and the quick actions are dimmed and do nothing. Turn it back on; they come back. | |
+| 12 | Rejected command | Make the car refuse one (for example start charging with no cable plugged in). The value reverts and the toast gives Tesla's reason. | |
+| 13 | Token failure | Make `/api/token` fail (for example revoke the Tesla refresh token so the backend reports renewing, or point the app at a backend that answers 503 `token_unavailable`). A command shows the renewing toast, More → Connection turns red, and the app stays signed in on Status. | |
+| 14 | Realtime fast restart | Background and foreground the app several times in a few seconds, then change something on the car. Status still updates within 15 s. | |
+| 15 | Capsule edges | Look at the Sign in with Apple button and the glass capsules at full zoom for a 1 px sliver along an edge. | |
+
+## Known limitations
+
+Deferred by earlier reviews and not changed in Slice 1C; each is minor.
+
+- **Time picker across DST.** On the spring-forward night the Charge schedule picker can show a time that does not
+  exist that day.
+- **°F targets.** The stepper moves one whole °F and stores the nearest 0.5 °C, so the number on screen never repeats
+  or skips. The car still receives 0.5 °C steps, so its own °F display can differ from Garage's by up to 0.45 °F.
+- **Wake prompt under a sheet.** If a Status command needs a wake while a Climate or Charge sheet covers Status, the
+  prompt is not shown and the lock pill stays pending until the sheet closes.
+- **Sheet edge cases.** An unrelated command queued behind one whose wake was cancelled is declined with it (asleep
+  car only); a sent "on" schedule overlay sticks if the time is changed from elsewhere, until the sheet's model is
+  dropped; the frunk → wake single-alert hand-over needs a device check; the `laterChangeRestartsQuietTime` test is
+  timing-sensitive.
+- **Mac layout.** The sidebar look and the tab-bar glass and tint are not covered by snapshots; Mac snapshots are
+  iPad-trait renders, and the live MapKit path is not snapshotted. Below 1000 pt wide Status falls back to the single
+  column, and the floating panel's height in short windows is unverified.
+- **Accessibility sizes.** Tile heights are uneven at AX1, and the AX2 + scrolling-sheet path has no snapshot. The
+  pill row now picks its style from "Unlock", so Lock and Unlock never change layout, but that case has no
+  dedicated snapshot.
+- **Icons.** The bundled Lucide SVGs still carry 1.45 stamps although `fetch-icons.sh` pins 1.60.0; run the script to
+  refresh them.
+- **Realtime restart.** The client library skips the server unsubscribe for a channel that is still joining, so a
+  very fast restart can leave a second channel briefly; check 14 above covers it on device. If the app was offline
+  at launch and the network comes back while it stays in the foreground, the store starts at the next foreground
+  (or the next onboarding check).
+- **Backend `last_error`.** The backend may keep `last_error` after a successful Tesla reconnect, keeping More's
+  Connection row red; verify live.
+- **Sign-in edge cases.** Two overlapping Tesla web sign-ins can clear the newer session's reference, and a very
+  quick re-auth can race the authenticator's clean-up; a 401 from an intermediary (not the backend) signs out
+  locally; the backend's `token_exchange_failed` code is unused (it sends raw text, shown as generic copy); the email
+  field trims spaces but not newlines.
+- **Vehicle check.** A car already in memory satisfies the onboarding vehicle check, so a car unlinked on another
+  device is noticed only after a relaunch.
+- **Decoding and storage.** Nested `jsonb` columns are decoded strictly (a malformed `doors` object fails the row
+  rather than that field), and outside the sandbox (tests, `swift test`) the snapshot lives in the generic
+  `Application Support/garage` folder.

@@ -30,8 +30,14 @@ public protocol RealtimeFeed: Sendable {
 /// channel is asynchronous (it awaits the server's unsubscribe). With a fixed topic, a quick
 /// stop/start, which is common when offline, could attach to the dying channel and never receive
 /// anything. The topic name does not affect `postgres_changes` routing; the filter does that. The feed
-/// also remembers the pending removal, and the next subscription waits for it, so at most one channel
-/// per feed is ever joined.
+/// also remembers the pending removal, and the next subscription waits for it before joining. That
+/// keeps a quick restart off the dying channel, but it is not a strict one-channel guarantee: the wait
+/// covers only the most recent teardown, and the library skips the server unsubscribe for a channel
+/// that is still joining, so two uniquely named channels can briefly coexist (each is removed).
+///
+/// The stream reports `.disconnected` when a joined channel leaves the subscribed state. Rejoining
+/// after a socket drop is the client's job; a channel the server closed stays closed, and
+/// ``VehicleStore`` then opens a new one after its re-subscribe delay.
 public struct SupabaseRealtimeFeed: RealtimeFeed {
     let client: SupabaseClient
     private let removal = PendingRemoval()

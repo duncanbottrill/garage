@@ -146,8 +146,11 @@ public struct StatusView: View {
 
     // MARK: Layout
 
-    private func layout(_ status: StatusModel, trail: [TrailPoint], pending: Set<String>, actionsEnabled: Bool) -> some View {
-        GeometryReader { geometry in
+    /// `actionsEnabled`: a car is linked to send to; the proxy rule (``StatusModel/quickActionsEnabled``)
+    /// is applied here on top.
+    private func layout(_ status: StatusModel, trail: [TrailPoint], pending: Set<String>, actionsEnabled linked: Bool) -> some View {
+        let actionsEnabled = linked && status.quickActionsEnabled
+        return GeometryReader { geometry in
             let actions = QuickActions.Actions(
                 toggleLock: { toggleLock(status) },
                 openClimate: { if let onOpenClimate { onOpenClimate() } else { present(.climate) } },
@@ -239,14 +242,8 @@ public struct StatusView: View {
         let pending = app.commandClient.pending.union(runner.pending)
         guard !pending.contains(Command.doorLock.name), !pending.contains(Command.doorUnlock.name) else { return }
         let target = status.lockState != .locked
-        guard let intent = optimisticLock.begin(target: target) else { return }
         Task {
-            if await runner.run(target ? .doorLock : .doorUnlock) == .sent {
-                await optimisticLock.sent(intent, rowLocked: app.vehicleStore.state?.locked)
-            } else {
-                // Failed (the toast says why), declined at the wake prompt, or already in flight.
-                optimisticLock.failed(intent)
-            }
+            await optimisticLock.toggle(to: target, with: runner) { app.vehicleStore.state?.locked }
         }
     }
 
@@ -326,6 +323,11 @@ public struct StatusView: View {
         let loader = TrailLoader(fetcher: SupabaseTrailFetcher(client: app.client))
         trailLoader = loader
         await loader.load(vehicleID: id)
+        // A parked car sends no new positions, so the window is also enforced on a timer.
+        while !Task.isCancelled {
+            try? await Task.sleep(for: TrailLoader.pruneInterval)
+            loader.prune()
+        }
     }
 
     private func appendTrailPoint(_ state: VehicleState?) {
