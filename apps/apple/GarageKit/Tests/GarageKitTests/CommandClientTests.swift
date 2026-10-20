@@ -357,6 +357,31 @@ extension CommandClientTests {
         #expect(await rig.usageBodies().isEmpty)
     }
 
+    /// A token fetch that works clears the token failure even when the car then refuses the command.
+    @Test func tokenSuccessClearsFailureEvenWhenProxyFails() async {
+        let rig = Rig()
+        rig.backend.on("GET", "/api/token") { _ in .json(503, #"{"error":"token_unavailable"}"#) }
+        await #expect(throws: CommandError.tokenUnavailable(retryAt: nil)) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        #expect(rig.client.tokenFailure == .tokenUnavailable(retryAt: nil))
+
+        rig.backend.on("GET", "/api/token") { _ in .json(200, #"{"access_token":"tesla-ok","expires_at":"2099-01-01T00:00:00Z"}"#) }
+        rig.onCommand("door_lock", .json(408, #"{"response":null,"error":"vehicle unavailable: vehicle is offline or asleep"}"#))
+        await #expect(throws: CommandError.asleep) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        #expect(rig.client.tokenFailure == nil)
+
+        // A 401, then a refresh that fails: the failure stands.
+        let rig2 = Rig()
+        let calls = Mutex(0)
+        rig2.backend.on("GET", "/api/token") { _ in
+            calls.withLock { n in n += 1; return n } == 1
+                ? .json(200, #"{"access_token":"tesla-1","expires_at":"2099-01-01T00:00:00Z"}"#)
+                : .json(503, #"{"error":"token_unavailable"}"#)
+        }
+        rig2.onCommand("door_lock", .json(401, #"{"response":null,"error":"invalid bearer token"}"#))
+        await #expect(throws: CommandError.tokenUnavailable(retryAt: nil)) { try await rig2.client.send(.doorLock, vin: Rig.vin) }
+        #expect(rig2.client.tokenFailure == .tokenUnavailable(retryAt: nil))
+    }
+
     /// A token that arrives after the send timed out must not send the command: the user was told it
     /// did not go through.
     @Test func lateTokenAfterTimeoutNeverPosts() async throws {

@@ -241,19 +241,36 @@ public final class VehicleStore {
         }
     }
 
-    /// Merges a full row read elsewhere (More's "Refresh now" answer). Ignored when it belongs to
-    /// another car or is older than the current row; otherwise adopted and cached like a fetched row.
-    public func apply(state fetched: VehicleState) {
-        if let expected = vehicle?.id ?? state?.vehicleId, let actual = fetched.vehicleId, actual != expected { return }
-        adoptFetched(fetched)
+    /// Merges a row read elsewhere: More's "Refresh now" answer, which is the bridge-less PATCH the
+    /// backend wrote (no `vehicle_id`, `bridge_seen_at` or `bridge_health`). Only the fields it carries
+    /// replace the current ones, as for a Realtime record; the result is then adopted and cached like a
+    /// fetched row unless it is older than the current row. Ignored while no car is loaded (after
+    /// sign-out) or when it names another car.
+    public func apply(state patch: VehicleState) {
+        guard let expected = vehicle?.id else { return }
+        if let actual = patch.vehicleId, actual != expected { return }
+        do {
+            // The encoder omits nil fields, so absent columns keep their current values.
+            let fields = try JSONDecoder().decode([String: AnyJSON].self, from: GarageJSON.encoder.encode(patch))
+            var merged = try currentStateJSON()
+            merged.merge(fields) { _, new in new }
+            var next = try GarageJSON.decode(VehicleState.self, from: merged)
+            next.vehicleId = next.vehicleId ?? expected
+            adoptFetched(next)
+        } catch {
+            Self.logger.error("Ignoring undecodable refreshed row: \(error)")
+        }
     }
 
     // MARK: Feed
 
     /// Opens a channel and follows it. A stream that ends on its own counts as a dropped channel.
     private func subscribe(vehicleID: UUID, generation mine: Int) {
-        let events = feed.events(for: vehicleID)
+        // Cancel first: tearing the old stream down records its channel removal, which the new
+        // subscription then waits for, so two channels are not joined at once.
         feedTask?.cancel()
+        feedTask = nil
+        let events = feed.events(for: vehicleID)
         feedTask = Task { [weak self] in
             for await event in events {
                 guard let self, !Task.isCancelled else { return }

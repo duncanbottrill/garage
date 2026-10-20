@@ -42,6 +42,12 @@ struct StatusSheet: View {
             tiles
             Hairline()
             QuickActions(lockState: model.lockState, pending: pending, enabled: actionsEnabled, actions: actions)
+            if let caption = model.quickActionsCaption {
+                Text(caption)
+                    .garage(.caption)
+                    .foregroundStyle(Tokens.Colors.muted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
         }
         .padding(.horizontal, Tokens.Space.xl)
         .padding(.top, docked ? Tokens.Space.s : Tokens.Space.xl)

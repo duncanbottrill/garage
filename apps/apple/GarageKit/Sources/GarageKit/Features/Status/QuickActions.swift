@@ -37,18 +37,14 @@ struct QuickActions: View {
     private var lockLabel: String { lockState == .locked ? "Unlock" : "Lock" }
 
     /// A candidate row as wide as its widest-label version: the visible row is laid out in that width
-    /// (its pills fill it either way), and `ViewThatFits` compares the widest version.
-    @ViewBuilder
+    /// (its pills fill it either way), and `ViewThatFits` compares the widest version. The same
+    /// structure for both lock states keeps the pills' identity when the car locks.
     private func row(_ style: QuickActionPill.Style) -> some View {
-        if lockLabel == Self.widestLockLabel {
+        ZStack {
+            row(style, lockLabel: Self.widestLockLabel)
+                .hidden()
+                .accessibilityHidden(true)
             row(style, lockLabel: lockLabel)
-        } else {
-            ZStack {
-                row(style, lockLabel: Self.widestLockLabel)
-                    .hidden()
-                    .accessibilityHidden(true)
-                row(style, lockLabel: lockLabel)
-            }
         }
     }
 

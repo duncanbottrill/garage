@@ -78,6 +78,10 @@ public struct StatusModel: Sendable, Equatable {
     /// The quick actions can send: false while the proxy is known to be unreachable (Tailscale off),
     /// when the banner says so. Before the first probe (`.unknown`) they stay usable.
     public let quickActionsEnabled: Bool
+    /// One line under the dimmed quick actions saying why, when the banner is busy with something
+    /// else (telemetry paused or the budget): the Tailscale copy. Nil when the actions work or the
+    /// Tailscale banner already says it.
+    public let quickActionsCaption: String?
     /// The banner to show, or nil.
     public let banner: Banner?
     /// The banner's one line of copy, or nil.
@@ -163,6 +167,8 @@ public struct StatusModel: Sendable, Equatable {
         quickActionsEnabled = reachability != .unreachable
         banner = Self.banner(state: state, bridgeOnline: bridgeOnline, vehicle: vehicle, reachability: reachability)
         bannerMessage = banner.map { Self.message(for: $0, timeZone: timeZone) }
+        quickActionsCaption = quickActionsEnabled || banner == .tailscaleOff
+            ? nil : Self.message(for: .tailscaleOff, timeZone: timeZone)
 
         let newest = [state?.chargeAt, state?.climateAt, state?.locationAt, state?.bodyAt].compactMap { $0 }.max()
         let asleep = state?.sleepState?.lowercased() == "asleep"

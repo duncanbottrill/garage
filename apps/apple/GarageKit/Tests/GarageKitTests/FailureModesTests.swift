@@ -62,11 +62,20 @@ private final class MemoryAuthStorage: AuthLocalStorage, @unchecked Sendable {
         #expect(off.banner == .tailscaleOff)
         #expect(off.bannerMessage == "Connect Tailscale to control the car")
         #expect(off.quickActionsEnabled == false)
-        let actions = QuickActions(lockState: off.lockState, pending: [], enabled: off.quickActionsEnabled, actions: .init())
-        #expect(actions.enabled == false)
+        #expect(off.quickActionsCaption == nil, "the banner already says why")
+
+        // Bridge offline too: the banner is about telemetry, so a caption under the pills says why
+        // they are dimmed.
+        var paused = state
+        paused.bridgeSeenAt = Self.now.addingTimeInterval(-120)
+        let both = StatusModel(state: paused, vehicle: nil, now: Self.now, reachability: .unreachable, timeZone: Self.utc)
+        #expect(both.banner == .telemetryPaused(since: paused.bridgeSeenAt))
+        #expect(!both.quickActionsEnabled)
+        #expect(both.quickActionsCaption == "Connect Tailscale to control the car")
 
         // Reachable, or not probed yet: the controls work (a failed send says why).
         #expect(StatusModel(state: state, vehicle: nil, now: Self.now, reachability: .reachable).quickActionsEnabled)
+        #expect(StatusModel(state: paused, vehicle: nil, now: Self.now, reachability: .reachable).quickActionsCaption == nil)
         #expect(StatusModel(state: state, vehicle: nil, now: Self.now, reachability: .unknown).quickActionsEnabled)
     }
 

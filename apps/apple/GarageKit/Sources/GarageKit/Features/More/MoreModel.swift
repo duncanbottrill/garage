@@ -282,7 +282,7 @@ public final class MoreModel {
         case .tokenUnavailable(nil):
             "Renewing Tesla access · commands paused"
         case .sessionExpired:
-            "The Tesla token was refused for this sign-in · sign out and in again"
+            "Your Garage sign-in was refused"
         case .unauthorized:
             "No Tesla token · reconnect Tesla"
         default:

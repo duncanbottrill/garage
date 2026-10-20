@@ -132,7 +132,7 @@ notes) in the last column; the same lines go in the plan's execution record.
 
 ## Known limitations
 
-Deferred by earlier reviews and not changed in Slice 1C; each is minor.
+Minor items that earlier reviews deferred and Slice 1C leaves open, plus what remains of the ones it fixed.
 
 - **Time picker across DST.** On the spring-forward night the Charge schedule picker can show a time that does not
   exist that day.
@@ -150,6 +150,8 @@ Deferred by earlier reviews and not changed in Slice 1C; each is minor.
 - **Accessibility sizes.** Tile heights are uneven at AX1, and the AX2 + scrolling-sheet path has no snapshot. The
   pill row now picks its style from "Unlock", so Lock and Unlock never change layout, but that case has no
   dedicated snapshot.
+- **Capsule edges.** A 1 px sliver may show along the edge of the Sign in with Apple button and the glass capsules
+  on some displays; it does not show in snapshots, so it is a device check (row 15 above).
 - **Icons.** The bundled Lucide SVGs still carry 1.45 stamps although `fetch-icons.sh` pins 1.60.0; run the script to
   refresh them.
 - **Realtime restart.** The client library skips the server unsubscribe for a channel that is still joining, so a

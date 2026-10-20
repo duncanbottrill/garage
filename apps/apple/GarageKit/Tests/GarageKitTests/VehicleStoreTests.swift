@@ -273,18 +273,58 @@ private final class ScriptedFeed: RealtimeFeed, @unchecked Sendable {
     }
 }
 
-/// Sleeps 20 ms instead of the requested delay (long enough for a stream's queued events to be
-/// handled first) and records the delays that ran to the end, not those cancelled.
-private final class RecordingSleeper: @unchecked Sendable {
+/// A sleeper the test drives: each sleep waits until ``release()`` and is recorded then; a cancelled
+/// one throws at once and is not recorded.
+private final class GatedSleeper: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let duration: Duration
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+
     private let lock = NSLock()
-    private var _delays: [Duration] = []
-    var delays: [Duration] { lock.withLock { _delays } }
+    private var waiters: [Waiter] = []
+    private var cancelledEarly: Set<UUID> = []
+    private var _released: [Duration] = []
+    /// Delays that ran to the end, in order.
+    var released: [Duration] { lock.withLock { _released } }
+    /// Delays waiting to be released, oldest first.
+    var waiting: [Duration] { lock.withLock { waiters.map(\.duration) } }
 
     var sleep: @Sendable (Duration) async throws -> Void {
         { [self] duration in
-            try await Task.sleep(for: .milliseconds(20))
-            lock.withLock { _delays.append(duration) }
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                    let cancelled = lock.withLock {
+                        if cancelledEarly.remove(id) != nil { return true }
+                        waiters.append(Waiter(id: id, duration: duration, continuation: continuation))
+                        return false
+                    }
+                    if cancelled { continuation.resume(throwing: CancellationError()) }
+                }
+            } onCancel: {
+                let waiter: Waiter? = lock.withLock {
+                    guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+                        cancelledEarly.insert(id)
+                        return nil
+                    }
+                    return waiters.remove(at: index)
+                }
+                waiter?.continuation.resume(throwing: CancellationError())
+            }
         }
+    }
+
+    /// Ends the oldest waiting sleep.
+    func release() {
+        let waiter: Waiter? = lock.withLock {
+            guard !waiters.isEmpty else { return nil }
+            let first = waiters.removeFirst()
+            _released.append(first.duration)
+            return first
+        }
+        waiter?.continuation.resume()
     }
 }
 
@@ -327,15 +367,29 @@ extension VehicleStoreTests {
             .open([.subscribed, .disconnected]),
             .open([.subscribed]),
         ])
-        let sleeper = RecordingSleeper()
+        let sleeper = GatedSleeper()
         let fetcher = FakeFetcher(vehicle: testVehicle, state: try Fixture.state("vehicle_state_sparse"))
         let store = VehicleStore(feed: feed, fetcher: fetcher, cache: InMemorySnapshotCache(), sleep: sleeper.sleep)
 
         await store.start()
-        await waitUntil { feed.opened == 4 && store.isLive }
+        // Channel 1 joins, then drops: a 2 s wait.
+        await waitUntil { sleeper.waiting == [.seconds(2)] && !store.isLive }
+        #expect(sleeper.waiting == [.seconds(2)])
+        sleeper.release()
+        // Channel 2 never joins: the next wait is 4 s.
+        await waitUntil { feed.opened == 2 && sleeper.waiting == [.seconds(4)] }
+        #expect(sleeper.waiting == [.seconds(4)])
+        sleeper.release()
+        // Channel 3 joins (cancelling the 8 s wait armed with it) and drops: back to 2 s.
+        await waitUntil { feed.opened == 3 && sleeper.waiting == [.seconds(2)] }
+        #expect(sleeper.waiting == [.seconds(2)])
+        sleeper.release()
+        // Channel 4 joins and stays.
+        await waitUntil { feed.opened == 4 && store.isLive && sleeper.waiting.isEmpty }
 
         #expect(feed.opened == 4)
-        #expect(sleeper.delays == [.seconds(2), .seconds(4), .seconds(2)])
+        #expect(sleeper.released == [.seconds(2), .seconds(4), .seconds(2)])
+        #expect(sleeper.waiting.isEmpty)
         #expect(feed.terminated == 3)
         #expect(store.isLive)
         #expect(fetcher.stateCalls >= 2, "the row is fetched again after rejoining")
@@ -347,14 +401,17 @@ extension VehicleStoreTests {
     /// A stream that ends on its own (the channel is gone) is replaced too.
     @Test func resubscribesWhenStreamEnds() async throws {
         let feed = ScriptedFeed([.finish([.subscribed]), .open([.subscribed])])
-        let sleeper = RecordingSleeper()
+        let sleeper = GatedSleeper()
         let store = VehicleStore(feed: feed, fetcher: FakeFetcher(vehicle: testVehicle, state: nil), cache: InMemorySnapshotCache(), sleep: sleeper.sleep)
 
         await store.start()
-        await waitUntil { feed.opened == 2 && store.isLive }
+        await waitUntil { sleeper.waiting == [.seconds(2)] }
+        #expect(feed.opened == 1)
+        sleeper.release()
+        await waitUntil { feed.opened == 2 && store.isLive && sleeper.waiting.isEmpty }
 
         #expect(feed.opened == 2)
-        #expect(sleeper.delays == [.seconds(2)])
+        #expect(sleeper.released == [.seconds(2)])
         #expect(store.isLive)
         store.stop()
     }
@@ -498,6 +555,53 @@ extension VehicleStoreTests {
         store.apply(state: refreshed)
         #expect(store.state?.soc == 70)
         store.stop()
+    }
+
+    /// The Refresh-now answer is the backend's PATCH: no `vehicle_id`, bridge fields or `updated_at`
+    /// beyond what it wrote. Merged, the bridge check-in, its health and the car id survive.
+    @Test func applyPatchKeepsBridgeFields() async throws {
+        let cache = CountingCache()
+        let fetcher = FakeFetcher(vehicle: testVehicle, state: try Fixture.state("vehicle_state_live"))
+        let store = VehicleStore(feed: IdleFeed(), fetcher: fetcher, cache: cache)
+        await store.start()
+        let before = try #require(store.state)
+        #expect(before.bridgeSeenAt != nil)
+        #expect(before.bridgeHealth != nil)
+
+        var patch = VehicleState()
+        patch.soc = 81
+        patch.rangeKm = 390
+        patch.chargeAt = before.chargeAt?.addingTimeInterval(600)
+        store.apply(state: patch)
+
+        #expect(store.state?.soc == 81)
+        #expect(store.state?.rangeKm == 390)
+        #expect(store.state?.bridgeSeenAt == before.bridgeSeenAt)
+        #expect(store.state?.bridgeHealth == before.bridgeHealth)
+        #expect(store.state?.vehicleId == vehicleID)
+        #expect(store.state?.locked == before.locked, "fields the patch omits are kept")
+        #expect(cache.load() == store.state, "the merged row is what gets cached")
+
+        // A patch stamped older than the current row is still refused.
+        var old = VehicleState()
+        old.soc = 5
+        old.updatedAt = before.updatedAt?.addingTimeInterval(-60)
+        store.apply(state: old)
+        #expect(store.state?.soc == 81)
+        store.stop()
+    }
+
+    /// With no car loaded (the store after sign-out) a late Refresh-now answer is dropped.
+    @Test func applyStateIgnoredWithoutVehicle() throws {
+        let cache = CountingCache()
+        let store = VehicleStore(feed: IdleFeed(), fetcher: FakeFetcher(vehicle: nil, state: nil), cache: cache)
+        var patch = VehicleState()
+        patch.soc = 50
+
+        store.apply(state: patch)
+
+        #expect(store.state == nil)
+        #expect(cache.saves == 0)
     }
 
     /// `isStarted` is true from a `start()` that found the car until `stop()`.

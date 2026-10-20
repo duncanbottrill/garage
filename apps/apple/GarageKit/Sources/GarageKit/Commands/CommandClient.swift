@@ -19,7 +19,7 @@ import Synchronization
 /// - Nothing here wakes the car on its own: ``CommandError/asleep`` goes back to the caller, which
 ///   asks the user before calling ``wake(vin:)``.
 /// - A failed token fetch is published as ``tokenFailure`` (More's Connection row turns red) until a
-///   send succeeds. It is never a reason to sign out.
+///   later token fetch succeeds, whatever the proxy then answers. It is never a reason to sign out.
 /// - The caller cancelling a send gets `CancellationError`; once a send has timed out or been
 ///   cancelled, nothing more is posted for it, even if its token arrives later.
 @MainActor
@@ -32,7 +32,7 @@ public final class CommandClient {
     public private(set) var pending: Set<String> = []
 
     /// The last token failure a send ran into (`/api/token` refused the session, is renewing, or has no
-    /// Tesla account), until a send succeeds; nil when the last token fetch worked.
+    /// Tesla account); nil once a later send's token fetch works, even if the proxy then fails.
     public private(set) var tokenFailure: CommandError?
 
     /// The proxy's reachability, as last published by ``reachabilityMonitor``.
@@ -110,6 +110,8 @@ public final class CommandClient {
             session: session,
             timeout: timeout
         )
+        // A token fetch that worked clears the failure, even when the proxy or the car then refuses.
+        defer { if exchange.tokenSignal.fetched { tokenFailure = nil } }
         do {
             try await exchange.run()
         } catch let failure as ProxyExchange.TokenFailure {
@@ -122,7 +124,6 @@ public final class CommandClient {
         } catch {
             throw CommandError.rejected(reason: "Unexpected error: \(error.localizedDescription)")
         }
-        tokenFailure = nil
         usage.record(kind == .wake ? .wakes : .commands)
         return true
     }
@@ -161,6 +162,16 @@ struct ProxyExchange: Sendable {
     let tokens: TokenProvider
     let session: URLSession
     let timeout: Duration
+    /// How this exchange's latest token fetch went.
+    let tokenSignal = TokenSignal()
+
+    /// Whether the exchange's latest token fetch succeeded (the retry after a 401 fetches again),
+    /// readable from the caller after it ends.
+    final class TokenSignal: Sendable {
+        private let value = Mutex(false)
+        var fetched: Bool { value.withLock { $0 } }
+        func record(_ fetched: Bool) { value.withLock { $0 = fetched } }
+    }
 
     /// Performs the exchange within `timeout`, or throws ``CommandError/timeout`` at the deadline.
     ///
@@ -254,9 +265,11 @@ struct ProxyExchange: Sendable {
         do {
             token = try await fetchToken(forceRefresh: forceRefresh)
         } catch let error as CommandError {
+            tokenSignal.record(false)
             throw TokenFailure(error: error)
         }
         try Task.checkCancellation()
+        tokenSignal.record(true)
         return token
     }
 
