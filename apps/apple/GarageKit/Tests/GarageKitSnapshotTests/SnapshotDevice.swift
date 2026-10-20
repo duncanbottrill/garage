@@ -25,3 +25,18 @@ enum SnapshotTolerance {
     static let perceptualPrecision: Float = 0.98
 }
 #endif
+
+#if os(iOS)
+extension UITraitCollection {
+    /// The Mac window the Status snapshots stand in for (rendered on the iOS simulator at a fixed
+    /// 1280 × 800 pt layout): dark appearance at @2x, regular size classes.
+    @MainActor static let mac1280Dark = UITraitCollection { traits in
+        traits.displayScale = 2
+        traits.userInterfaceIdiom = .pad
+        traits.horizontalSizeClass = .regular
+        traits.verticalSizeClass = .regular
+        traits.userInterfaceStyle = .dark
+        traits.preferredContentSizeCategory = .large
+    }
+}
+#endif
