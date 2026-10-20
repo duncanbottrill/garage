@@ -218,3 +218,31 @@ supabase/migrations/0017_proxy_base_url.sql
 - **Type consistency:** `VehicleState`, `Vehicle.proxyBaseURL`, `Freshness`, `CommandClient.send(_:vin:)`, `Command` names, `OnboardingFlow.Step`, `StatusModel.banner` used identically across tasks ✓.
 - **Review Focus:** each of the five lines has its test in T4/T5/T7 ✓.
 - **Proportion:** ~330 lines against a 360-line spec; no bodies except where values are pinned ✓.
+
+---
+
+## Execution record (2026-10-20)
+
+Executed subagent-driven on branch `slice-1c-apple` (23 commits). Every task passed a spec + quality review; Tasks 2–10 each needed one fix round. Final whole-branch review: no Critical, eight Important, all fixed in one wave and re-verified. Suites at the end: 178 GarageKit unit tests, 27 snapshot tests (iPhone 17 Pro dark; Mac states rendered with iPad traits), iOS and macOS builds clean, fresh-clone build proven. Bridge add-on 0.3.0 (Task 1) tagged `bridge-v0.3.0` and published; migration 0017 applied to the hosted project.
+
+**Rulings made during execution**
+1. `TypeScale` enum lives in GarageKit, not in the generated tokens file.
+2. `bridge-v0.3.0` tagged from the branch commit before merge so the app could test against the live proxy.
+3. Units follow `Locale.measurementSystem`: UK → miles + °C (the plan's "en_GB → km" line was wrong).
+4. `CommandError` gained `.tokenUnavailable(retryAt:)` and `.sessionExpired` (spec §10: token failures never sign the user out).
+5. Accepted: an unreachable proxy stops blocking onboarding after the first completion, keyed to the Supabase user id.
+6. The app tolerates the bridge never clearing `scheduled_charge_at` (overlay held until the row changes; past schedule = enabled).
+
+**Deferred (not blocking merge)**
+- Bridge 0.3.1: `tailscale cert` timeout; `merge_vehicle_state` `p_clear` so invalid fields (e.g. `ScheduledChargingStartTime`) clear `scheduled_charge_at` and friends; stale-fqdn first-cert delay; `proxy_base_url` rewritten once per process start.
+- Wake flow: after a confirmed wake, wait for Realtime `sleep_state` online (≤ 30 s, no polling) before sending the woken command.
+- Usage ledger: pending counts are in memory only (loss window on kill/suspend; flush before sign-out; macOS background phase rarely fires); possible double count when a reply is lost after the server recorded it.
+- `teslaRejected` stays set after a successful reconnect until the next command; clear it on the `garage://connected` callback.
+- Realtime: fast stop/start on device (`removeChannel` skips unsubscribe while `.subscribing`); channel churn on slow reconnects is benign.
+- Status/map: re-centre semantics on Mac pan, wash-square bounds, trail pruning while parked, Mac snapshots are iPad-trait renders, 375 pt / AX2 layouts, capsule 1 px edge sliver (renderer artefact suspected; device check), Status "Stale" caption date rules.
+- Sheets: DST spring-forward picker display, °F step display, sticky "on" schedule overlay if the time changes elsewhere, frunk→wake alert hand-over on device.
+- Auth: overlapping web-auth session identity (guarded, untested), 401 from an intermediary signs out locally, `token_exchange_failed` code unused, email trim with `.whitespaces`.
+- Packaging: transitive SwiftPM pins (`Package.resolved` lives in the ignored xcodeproj), shared entitlements file on iOS, `GarageKit` enum shadows the module name, lenient nested jsonb decoding, macOS Application Support folder naming.
+- Spec follow-ups: pairing deep link for `.keyMissing` (key already paired), per-reason rejected copy, published `proxy_base_url` validation (`.ts.net` host), raw backend `last_error` text in More.
+
+**Owner steps before the device run** (see `apps/apple/README.md`): Supabase Apple provider with client id `com.duncanbottrill.garage` + "Allow manual linking"; App ID registration via the first automatic-signing build; Garage Bridge add-on updated to 0.3.0 and `vehicles.proxy_base_url` non-null; Tailscale signed in on both devices. Then the README's device verification checklist (acceptance §15).
