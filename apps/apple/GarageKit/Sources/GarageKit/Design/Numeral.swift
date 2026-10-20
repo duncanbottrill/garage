@@ -23,18 +23,25 @@ public struct Numeral: View {
     }
 
     public var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Tokens.Space.xs) {
-            Text(value, format: .number.precision(.fractionLength(fractionDigits)))
-                .garage(scale, tabular: true)
-                .foregroundStyle(Tokens.Colors.ink)
-                .contentTransition(.numericText(value: value))
-            if let unit {
-                Text(unit)
-                    .garage(.label)
-                    .foregroundStyle(Tokens.Colors.muted)
-            }
-        }
-        .animation(.snappy, value: value)
-        .accessibilityElement(children: .combine)
+        // One Text for number and unit: a single line box at the scale's line height, the unit on the
+        // number's baseline. (An HStack of two Texts inflates the line box past the token height.)
+        Text("\(number)\(unitRun)")
+            .garageLineBox(scale)
+            .contentTransition(.numericText(value: value))
+            .animation(.snappy, value: value)
+    }
+
+    private var number: Text {
+        Text(value, format: .number.precision(.fractionLength(fractionDigits)))
+            .garageText(scale, tabular: true)
+            .foregroundStyle(Tokens.Colors.ink)
+    }
+
+    /// A word space in the label face (about 4 pt with its tracking) and the unit, muted; empty without a unit.
+    private var unitRun: Text {
+        guard let unit else { return Text(verbatim: "") }
+        return Text(verbatim: " \(unit)")
+            .garageText(.label)
+            .foregroundStyle(Tokens.Colors.muted)
     }
 }

@@ -39,6 +39,14 @@ public enum TypeScale: CaseIterable, Sendable {
     /// Letter spacing in points: the token's tracking is a fraction of the size (0.12 = +12 %).
     var trackingPoints: CGFloat { style.tracking * style.size }
 
+    /// The token line height (`lineHeight × size`) for SwiftUI's `lineHeight(_:)`. Display scales are a
+    /// fixed size, so they get exact points. UI scales get `.multiple(factor:)` with the token multiplier
+    /// itself: SwiftUI multiplies the font's point size (measured: 1.4 on 14 pt renders a 19.6 pt line),
+    /// so the line keeps tracking the Dynamic Type size.
+    public var lineHeight: AttributedString.LineHeight {
+        isDisplay ? .exact(points: style.lineHeight * style.size) : .multiple(factor: style.lineHeight)
+    }
+
     /// The face's own line height at this size (ascent + descent + leading), from the bundled font.
     var defaultLineHeight: CGFloat {
         GarageKit.registerFonts()
@@ -46,9 +54,14 @@ public enum TypeScale: CaseIterable, Sendable {
         return CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font)
     }
 
-    /// Extra space between lines so a line box is `lineHeight × size` tall. Negative for the tight
-    /// numeral scales, where the token line height is below the face's own.
-    var lineSpacing: CGFloat { style.lineHeight * style.size - defaultLineHeight }
+    /// How far up the glyphs move inside a display scale's line box. With an exact line height below the
+    /// face's own, SwiftUI keeps the baseline an ascent below the top and trims only the bottom, so the
+    /// glyphs hang out of the box (13 pt for the hero). Figma takes half the reduction off each edge;
+    /// moving the glyphs up by that half matches it. Zero for the UI scales.
+    var halfLeadingShift: CGFloat {
+        guard isDisplay else { return 0 }
+        return max(0, (defaultLineHeight - style.lineHeight * style.size) / 2)
+    }
 
     /// The Dynamic Type style a UI scale grows with.
     fileprivate var relativeTextStyle: Font.TextStyle {
@@ -86,11 +99,29 @@ public enum GarageFont {
 
 extension Text {
     /// Sets this text in a Garage type scale: family, size and weight from the token, tracking as a
-    /// fraction of the size, line spacing from the token line height, and tabular figures for the numeral
-    /// scales or wherever `tabular` is true (any column of numbers).
+    /// fraction of the size, the token line height, and tabular figures for the numeral scales or
+    /// wherever `tabular` is true (any column of numbers).
     public func garage(_ scale: TypeScale, tabular: Bool = false) -> some View {
+        garageText(scale, tabular: tabular).garageLineBox(scale)
+    }
+
+    /// Everything `garage(_:tabular:)` applies except the line height, still a `Text`, so styled runs
+    /// can be interpolated into one `Text` that then takes a single line height.
+    func garageText(_ scale: TypeScale, tabular: Bool = false) -> Text {
         let styled = font(scale.font).tracking(scale.trackingPoints)
-        return (scale.isDisplay || tabular ? styled.monospacedDigit() : styled)
-            .lineSpacing(scale.lineSpacing)
+        return scale.isDisplay || tabular ? styled.monospacedDigit() : styled
+    }
+}
+
+extension View {
+    /// Applies a scale's line height and, for the display scales, the half-leading correction: glyphs
+    /// drawn `halfLeadingShift` higher, with the text baselines moved to match so baseline alignment
+    /// still lines up with the drawn glyphs.
+    nonisolated func garageLineBox(_ scale: TypeScale) -> some View {
+        let shift = scale.halfLeadingShift
+        return lineHeight(scale.lineHeight)
+            .offset(y: -shift)
+            .alignmentGuide(.firstTextBaseline) { $0[.firstTextBaseline] - shift }
+            .alignmentGuide(.lastTextBaseline) { $0[.lastTextBaseline] - shift }
     }
 }
