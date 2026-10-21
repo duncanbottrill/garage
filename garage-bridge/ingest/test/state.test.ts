@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { decodePayload } from "../src/decode";
-import { sanitizeStatePatch, toSignalRow, toStatePatch, type BridgeEvent } from "../src/state";
+import { sanitizeStatePatch, toSignalRow, toStateClears, toStatePatch, type BridgeEvent } from "../src/state";
 import fixtures from "./fixtures/mqtt-samples.json";
 
 function payloadFor(id: string): unknown {
@@ -200,5 +200,26 @@ describe("toStatePatch / sanitizeStatePatch: type validation drops bad keys, not
   it("leaves a fully valid patch unchanged", () => {
     const patch = { soc: 72.5, charge_at: AT.toISOString(), locked: true, body_at: AT.toISOString(), gear: "D" };
     expect(sanitizeStatePatch(patch)).toEqual(patch);
+  });
+});
+
+describe("toStateClears: an invalid value that means 'no value' clears its state keys", () => {
+  const field = (name: string, value: unknown): BridgeEvent => ({ kind: "field", vin: "VIN1", name, value, at: AT });
+
+  it("ScheduledChargingStartTime null → clears scheduled_charge_at", () =>
+    expect(toStateClears(field("ScheduledChargingStartTime", null))).toEqual(["scheduled_charge_at"]));
+  it('ScheduledChargingStartTime decoded from "invalid" → clears scheduled_charge_at', () =>
+    expect(toStateClears(field("ScheduledChargingStartTime", decodePayload('"invalid"')))).toEqual(["scheduled_charge_at"]));
+  it("ScheduledChargingStartTime with a value clears nothing (and patches the time)", () => {
+    const ev = field("ScheduledChargingStartTime", 1_760_000_000);
+    expect(toStateClears(ev)).toEqual([]);
+    expect(toStatePatch(ev)).toEqual({ scheduled_charge_at: new Date(1_760_000_000 * 1000).toISOString() });
+  });
+  it("other signals clear nothing on null", () => {
+    for (const name of ["Soc", "Locked", "VehicleSpeed", "Gear"]) expect(toStateClears(field(name, null))).toEqual([]);
+  });
+  it("non-field events clear nothing", () => {
+    expect(toStateClears({ kind: "connectivity", vin: "VIN1", status: "DISCONNECTED", at: AT })).toEqual([]);
+    expect(toStateClears({ kind: "alert", vin: "VIN1", name: "x", active: true, at: AT })).toEqual([]);
   });
 });

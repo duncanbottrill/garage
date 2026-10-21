@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { telemetrySignalToState as m } from "../src/tesla/map-telemetry";
+import { telemetrySignalToState as m, telemetrySignalClears as clears } from "../src/tesla/map-telemetry";
 const at = new Date("2026-10-18T15:00:00Z"), iso = at.toISOString();
 describe("telemetrySignalToState", () => {
   it("Soc", () => expect(m("Soc", 72.4, at)).toEqual({ soc: 72.4, charge_at: iso }));
@@ -35,5 +35,12 @@ describe("telemetrySignalToState", () => {
     it("a real value still maps (WindowStateClosed → closed)", () => expect(m("FdWindow", "WindowStateClosed", at)).toEqual({ windows: { driver_front: false } }));
     it("HvacPowerStateOff still maps to false", () => expect(m("HvacPower", "HvacPowerStateOff", at)).toEqual({ hvac_on: false }));
     it("an out-of-range ScheduledChargingStartTime → {} rather than throwing", () => expect(m("ScheduledChargingStartTime", "1e400", at)).toEqual({}));
+  });
+});
+
+describe("telemetrySignalClears", () => {
+  it("ScheduledChargingStartTime invalid clears scheduled_charge_at", () => expect(clears("ScheduledChargingStartTime")).toEqual(["scheduled_charge_at"]));
+  it("signals whose absence carries no information clear nothing", () => {
+    for (const name of ["Soc", "Locked", "Gear", "VehicleSpeed", "Location", "DoorState", "Nonsense"]) expect(clears(name)).toEqual([]);
   });
 });

@@ -23,6 +23,8 @@ Five s6-supervised services:
   `tailscale cert` instead. In both modes, with Tailscale enabled, it also
   gets the Let's Encrypt certificate for the node's tailnet name for the
   command proxy, re-checks it daily and restarts the proxy when it changes.
+  Each `tailscale cert` call is limited to 120 seconds; a failed or timed-out
+  call is retried after 30 seconds, doubling to 10 minutes.
 - **telemetry**: Tesla's `fleet-telemetry` receiver, listening on port 8443
   inside the container and published on the Green's port 443 (the router
   forwards external TCP 443 there), publishing every record to the local
@@ -369,9 +371,11 @@ ingest does not log individual signals at `info`.
   mode): `tailscale serve` failed; read the serve output just above it in
   the log, and check that the node is up and the tailnet policy allows
   `tag:garage`.
-- **`tlscert: tailscale cert failed; retrying in 10 minutes`**: HTTPS
-  certificates are not enabled for the tailnet, or Let's Encrypt is rate
-  limiting this name. Enable them and wait for the retry.
+- **`tlscert: tailscale cert failed; retrying in 30s`** (then 60s, up to
+  600s): HTTPS certificates are not enabled for the tailnet, or Let's
+  Encrypt is rate limiting this name. Enable them and wait for the retry. A
+  `tailscale cert timed out after 120s` line just before it means tailscaled
+  or the ACME endpoint did not answer; the same retry applies.
 - **`tlscert: waiting for /data/tailscale/fqdn`** repeating: the tailscale
   service has not come up. Look further up the log for its error.
 - **`telemetry config ensure not synced` with `post_failed` and

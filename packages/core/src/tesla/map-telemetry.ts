@@ -10,6 +10,24 @@ const bool = (v: unknown) => (typeof v === "boolean" ? v : v === "true" ? true :
  * rather than map to a default like "closed", `false` or the string "null".
  */
 const noInfo = (v: unknown) => v == null || (typeof v === "string" && (v === "SNA" || v === "Unknown" || /^[A-Z][A-Za-z]*(Unknown|SNA)$/.test(v)));
+/**
+ * `vehicle_state` keys to set to NULL when `name` arrives as `invalid` (decoded
+ * to null). Only for signals whose absence IS the information: a scheduled
+ * charge that was cancelled comes through as an invalid
+ * `ScheduledChargingStartTime`, and `scheduled_charge_at` must not keep
+ * showing the old time. Everything else (speed, gear, location, ...) keeps its
+ * last value on `invalid`, as `telemetrySignalToState` returns `{}` for it.
+ * Only scalar columns belong here: the ingest lets a later value cancel a
+ * pending clear of the same key, and for a deep-merged column (`doors`,
+ * `windows`, `tpms_bar`) a partial value after a clear would merge into the
+ * old object server-side, so the clear would be lost.
+ */
+export function telemetrySignalClears(name: string): string[] {
+  switch (name) {
+    case "ScheduledChargingStartTime": return ["scheduled_charge_at"];
+    default: return [];
+  }
+}
 export function telemetrySignalToState(name: string, value: unknown, at: Date): Partial<VehicleStateRow> {
   if (noInfo(value)) return {};
   const iso = at.toISOString(); const n = num(value), b = bool(value);

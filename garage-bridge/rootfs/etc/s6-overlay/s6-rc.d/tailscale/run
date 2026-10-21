@@ -4,7 +4,11 @@
 # FQDN to /data/tailscale/fqdn, then hands off to garage-tailscale-publish
 # to expose the funnel/serve routes. Idempotent: `tailscale up` with the
 # same authkey/hostname on a node that is already up is a no-op re-auth,
-# and /data/tailscale persists node state across container restarts.
+# and /data/tailscale persists node state across container restarts. The
+# FQDN file from an earlier run is removed first: until this node is Running
+# again it is stale, and tlscert would otherwise call `tailscale cert`
+# before tailscaled is up and have to wait out a retry. Readers (tlscert,
+# the ingest's proxy URL publisher) wait for the fresh file instead.
 #
 # Failure handling: tailscaled runs in the background, so an EXIT trap
 # kills it whenever this script exits; otherwise s6's restart would start a
@@ -21,6 +25,7 @@ if ! bashio::config.true 'tailscale_enabled'; then
 fi
 
 mkdir -p /data/tailscale /run/tailscale
+rm -f /data/tailscale/fqdn /data/tailscale/fqdn.tmp
 
 AUTHKEY="$(bashio::config 'tailscale_authkey')"
 HOSTNAME_TS="$(bashio::config 'tailscale_hostname')"

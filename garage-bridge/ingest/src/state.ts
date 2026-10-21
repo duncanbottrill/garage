@@ -1,4 +1,4 @@
-import { telemetrySignalToState, type VehicleStateRow } from "@garage/core";
+import { telemetrySignalClears, telemetrySignalToState, type VehicleStateRow } from "@garage/core";
 
 export type BridgeEvent =
   | { kind: "field"; vin: string; name: string; value: unknown; at: Date }
@@ -118,4 +118,16 @@ export function toStatePatch(ev: BridgeEvent): Partial<VehicleStateRow> {
     case "error":
       return {};
   }
+}
+
+/**
+ * `vehicle_state` keys to set to NULL for this event: a field event decoded
+ * from `invalid` names the keys `@garage/core` says that absence clears
+ * (today only `ScheduledChargingStartTime` → `scheduled_charge_at`, so a
+ * cancelled scheduled charge does not keep showing its old time). Every
+ * other event clears nothing; `toStatePatch` still supplies the values.
+ */
+export function toStateClears(ev: BridgeEvent): string[] {
+  if (ev.kind !== "field" || ev.value != null) return [];
+  return telemetrySignalClears(ev.name);
 }

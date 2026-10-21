@@ -16,19 +16,21 @@ interface Setup {
   tailscaleEnabled: boolean;
   fqdn?: () => string;
   setProxyBaseUrl?: (url: string | null) => Promise<void>;
+  getProxyBaseUrl?: () => Promise<string | null>;
 }
 
 function setup(s: Setup) {
   const setProxyBaseUrl = vi.fn(s.setProxyBaseUrl ?? (async (): Promise<void> => {}));
+  const getProxyBaseUrl = vi.fn(s.getProxyBaseUrl ?? (async (): Promise<string | null> => null));
   const readFqdn = vi.fn(s.fqdn ?? (() => FQDN));
   const { log, calls } = fakeLog();
   const publisher = createProxyUrlPublisher({
     tailscaleEnabled: s.tailscaleEnabled,
     readFqdn,
-    sink: { setProxyBaseUrl },
+    sink: { setProxyBaseUrl, getProxyBaseUrl },
     log,
   });
-  return { publisher, setProxyBaseUrl, readFqdn, calls };
+  return { publisher, setProxyBaseUrl, getProxyBaseUrl, readFqdn, calls };
 }
 
 describe("createProxyUrlPublisher", () => {
@@ -42,7 +44,8 @@ describe("createProxyUrlPublisher", () => {
     await enabled.publisher.onHeartbeat();
     expect(enabled.setProxyBaseUrl).toHaveBeenCalledTimes(1);
 
-    const disabled = setup({ tailscaleEnabled: false });
+    // Disabled with a URL left in the row from an earlier run: cleared once.
+    const disabled = setup({ tailscaleEnabled: false, getProxyBaseUrl: async () => URL });
     await disabled.publisher.onHeartbeat();
     await disabled.publisher.onHeartbeat();
     expect(disabled.setProxyBaseUrl).toHaveBeenCalledTimes(1);
@@ -118,5 +121,33 @@ describe("createProxyUrlPublisher", () => {
     await first;
     await publisher.onHeartbeat();
     expect(setProxyBaseUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rewrite a URL the row already holds (a restart with an unchanged FQDN)", async () => {
+    const { publisher, setProxyBaseUrl, getProxyBaseUrl, calls } = setup({ tailscaleEnabled: true, getProxyBaseUrl: async () => URL });
+    await publisher.onHeartbeat();
+    await publisher.onHeartbeat();
+    expect(getProxyBaseUrl).toHaveBeenCalledTimes(1);
+    expect(setProxyBaseUrl).not.toHaveBeenCalled();
+    expect(calls.filter(([level]) => level === "info")).toEqual([]);
+
+    const disabled = setup({ tailscaleEnabled: false, getProxyBaseUrl: async () => null });
+    await disabled.publisher.onHeartbeat();
+    expect(disabled.setProxyBaseUrl).not.toHaveBeenCalled();
+  });
+
+  it("writes when the row holds a different URL, and still writes when the read fails", async () => {
+    const changed = setup({ tailscaleEnabled: true, getProxyBaseUrl: async () => "https://old-name.tail068c8f.ts.net:4443" });
+    await changed.publisher.onHeartbeat();
+    expect(changed.setProxyBaseUrl).toHaveBeenCalledWith(URL);
+
+    const unreadable = setup({ tailscaleEnabled: true, getProxyBaseUrl: async () => { throw new Error("read failed"); } });
+    await unreadable.publisher.onHeartbeat();
+    expect(unreadable.setProxyBaseUrl).toHaveBeenCalledWith(URL);
+    expect(unreadable.calls.some(([level, msg]) => level === "warning" && msg === "proxy_base_url read failed")).toBe(true);
+    // The read is attempted once; after a write the in-memory value is authoritative.
+    await unreadable.publisher.onHeartbeat();
+    expect(unreadable.getProxyBaseUrl).toHaveBeenCalledTimes(1);
+    expect(unreadable.setProxyBaseUrl).toHaveBeenCalledTimes(1);
   });
 });

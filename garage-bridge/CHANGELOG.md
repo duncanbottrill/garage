@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.1
+
+Follow-ups from the first weeks of live telemetry and the app.
+
+- A cancelled scheduled charge now clears `scheduled_charge_at`: when
+  `ScheduledChargingStartTime` arrives as `invalid` the ingest sends the
+  column in the new `p_clear` argument of `merge_vehicle_state` (migration
+  0018) instead of leaving the old time in place. Other signals keep their
+  last value on `invalid`, as before. Requires migration 0018 on the
+  Supabase project before this version is started.
+- `tlscert` bounds every `tailscale cert` call to 120 seconds (a stalled
+  tailscaled or ACME endpoint no longer hangs the renewal loop) and retries
+  a failed or timed-out call after 30 seconds, doubling to 10 minutes,
+  instead of a flat 10 minutes; both modes, telemetry and proxy
+  certificates alike.
+- The tailscale service removes the previous run's tailnet-name file at
+  start, so after a restart `tlscert` waits for the node to be up instead
+  of failing its first `tailscale cert` against a stale name.
+- The ingest reads `vehicles.proxy_base_url` before its first write, so a
+  restart with an unchanged tailnet name no longer rewrites the same URL;
+  it is written only when it differs (or the column is cleared when
+  Tailscale is disabled).
+
 ## 0.3.0
 
 Gets the command proxy ready for the Garage iPhone and Mac app, which

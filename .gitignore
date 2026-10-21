@@ -19,3 +19,4 @@ apps/apple/Signing.xcconfig
 apps/apple/**/DerivedData
 apps/apple/GarageKit/.build
 apps/apple/GarageKit/.swiftpm
+.boost/

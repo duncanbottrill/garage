@@ -26,7 +26,12 @@ export interface TelemetryConfigFields {
 export interface Sink {
   ensureStateRow(): Promise<void>;
   insertSignals(rows: SignalRow[]): Promise<void>;
-  mergeState(patch: Record<string, unknown>): Promise<void>;
+  /**
+   * Deep-merges `patch` into `vehicle_state` via `merge_vehicle_state`;
+   * `clear` names top-level columns to set to NULL in the same call (a key
+   * in both keeps the patch value, server-side).
+   */
+  mergeState(patch: Record<string, unknown>, clear?: string[]): Promise<void>;
   heartbeat(health: Record<string, unknown>): Promise<void>;
   countUsage(category: UsageCategory, n?: number): Promise<void>;
   countSignals(n: number): Promise<void>;
@@ -34,6 +39,8 @@ export interface Sink {
   setTelemetryConfig(fields: TelemetryConfigFields): Promise<void>;
   /** Writes `vehicles.proxy_base_url` (the tailnet URL of the command proxy), or clears it with `null`. */
   setProxyBaseUrl(url: string | null): Promise<void>;
+  /** Reads the current `vehicles.proxy_base_url` (`null` when unset or the row is missing). */
+  getProxyBaseUrl(): Promise<string | null>;
 }
 
 /**
@@ -62,9 +69,11 @@ export function SupabaseSink(client: SupabaseClient, initial: SupabaseSinkOption
     if (error) throw error;
   }
 
-  async function mergeState(patch: Record<string, unknown>): Promise<void> {
+  async function mergeState(patch: Record<string, unknown>, clear: string[] = []): Promise<void> {
     const cleaned = stripNulls(patch);
-    const { error } = await client.rpc("merge_vehicle_state", { p_vehicle: vehicleId, p_patch: cleaned });
+    const params: Record<string, unknown> = { p_vehicle: vehicleId, p_patch: cleaned };
+    if (clear.length > 0) params.p_clear = clear;
+    const { error } = await client.rpc("merge_vehicle_state", params);
     if (error) throw error;
   }
 
@@ -121,6 +130,13 @@ export function SupabaseSink(client: SupabaseClient, initial: SupabaseSinkOption
     if (error) throw error;
   }
 
+  async function getProxyBaseUrl(): Promise<string | null> {
+    const { data, error } = await client.from("vehicles").select("proxy_base_url").eq("id", vehicleId).maybeSingle();
+    if (error) throw error;
+    const url = (data as { proxy_base_url?: unknown } | null)?.proxy_base_url;
+    return typeof url === "string" && url !== "" ? url : null;
+  }
+
   return {
     ensureStateRow,
     insertSignals,
@@ -131,6 +147,7 @@ export function SupabaseSink(client: SupabaseClient, initial: SupabaseSinkOption
     resolveVehicle,
     setTelemetryConfig,
     setProxyBaseUrl,
+    getProxyBaseUrl,
   };
 }
 
