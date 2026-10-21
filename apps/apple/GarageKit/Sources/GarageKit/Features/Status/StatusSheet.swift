@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The glass sheet over the map: hero numeral and range, the charge line, the 2×2 tile grid
-/// (inside, outside, locks, charge port) and the quick actions, separated by hairlines.
+/// (inside, outside, locks, charge port) and the quick actions, separated by hairlines. Docked at the
+/// `compact` stop the tiles go, leaving the numeral, the charge line and the actions.
 struct StatusSheet: View {
     let model: StatusModel
     let pending: Set<String>
@@ -10,8 +11,12 @@ struct StatusSheet: View {
     /// iPhone: a grab indicator on top, square to the bottom edge (the glass runs off the screen).
     /// Mac: a floating panel with no grabber.
     let docked: Bool
+    /// Which stop the docked sheet is at; the Mac panel is always `full`.
+    var stop: SheetStop = .full
     /// Extra bottom padding inside the glass (the home-indicator safe area when docked).
     var bottomInset: CGFloat = 0
+    /// Tapping the grab indicator (or its VoiceOver action) asks for the other stop.
+    var onToggleStop: (() -> Void)? = nil
 
     var body: some View {
         // The sheet keeps its natural height; when that is more than the layout allows (large
@@ -31,6 +36,15 @@ struct StatusSheet: View {
         VStack(alignment: .leading, spacing: Tokens.Space.m) {
             if docked {
                 GrabIndicator()
+                    // A finger-sized target around the 4 pt capsule, without moving the content.
+                    .contentShape(Rectangle().inset(by: -Tokens.Space.m))
+                    .onTapGesture { onToggleStop?() }
+                    .accessibilityElement()
+                    .accessibilityLabel("Status panel")
+                    .accessibilityValue(stop == .full ? "Expanded" : "Compact")
+                    .accessibilityHint(stop == .full ? "Collapses to the charge and the quick actions" : "Shows the tiles as well")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { onToggleStop?() }
             }
             VStack(alignment: .leading, spacing: Tokens.Space.xs) {
                 HeroNumeral(model: model)
@@ -38,8 +52,10 @@ struct StatusSheet: View {
                     .garage(.body)
                     .foregroundStyle(Tokens.Colors.muted)
             }
-            Hairline()
-            tiles
+            if stop == .full {
+                Hairline()
+                tiles
+            }
             Hairline()
             QuickActions(lockState: model.lockState, pending: pending, enabled: actionsEnabled, actions: actions)
             if let caption = model.quickActionsCaption {

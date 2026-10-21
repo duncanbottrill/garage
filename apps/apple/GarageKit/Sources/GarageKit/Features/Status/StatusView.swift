@@ -4,8 +4,10 @@ import SwiftUI
 /// of charge, the charge line, four tiles and the quick actions, and one banner pinned above it.
 ///
 /// iPhone (narrow): the map fills the screen and the sheet is docked to the bottom edge, so about the
-/// top half shows the map. Mac and wide windows: the map is full-bleed and the sheet floats as a
-/// panel on the trailing side.
+/// top half shows the map. The sheet has two stops (``SheetStop``): drag it down to `compact` (hero
+/// numeral, charge line and quick actions) for more map, up to `full` for the tiles too; the stop is
+/// remembered. Mac and wide windows: the map is full-bleed and the sheet floats as a panel on the
+/// trailing side.
 ///
 /// Commands go through ``AppModel/commandClient`` via a ``CommandRunner``, so an asleep car gets the
 /// ``WakePrompt`` first and failures show a ``CommandToast``. Lock/Unlock flips the lock icon at once
@@ -39,12 +41,18 @@ public struct StatusView: View {
     }
 
     private let source: Source
+    /// `nil` for a fixed screen: the stop is shown as given and never saved.
+    private let stopDefaults: UserDefaults?
     private let mapEnabled: Bool
     private let onOpenClimate: (() -> Void)?
     private let onOpenCharge: (() -> Void)?
 
     @State private var optimisticLock = OptimisticLock()
     @State private var runner: CommandRunner
+    /// Where the docked sheet rests (iPhone); the Mac panel is always full.
+    @State private var sheetStop: SheetStop
+    /// How far the finger has dragged the docked sheet from its stop, in points.
+    @State private var sheetDrag: CGFloat = 0
     @State private var confirmingFrunk = false
     @State private var presentedSheet: ControlSheetKind?
     @State private var climate: ClimateModel?
@@ -71,15 +79,20 @@ public struct StatusView: View {
         let runner = CommandRunner(send: commands.send, wake: commands.wake)
         runner.isAsleep = { [weak model] in model?.vehicleStore.state?.sleepState?.lowercased() == "asleep" }
         _runner = State(initialValue: runner)
+        stopDefaults = .standard
+        _sheetStop = State(initialValue: SheetStop.saved(in: .standard))
     }
 
-    /// A fixed screen: `status` as given, with the commands in `pending` drawn in flight. Animations are off.
-    init(status: StatusModel, trail: [TrailPoint] = [], pending: Set<String> = [], mapEnabled: Bool = false) {
+    /// A fixed screen: `status` as given, with the commands in `pending` drawn in flight and the docked
+    /// sheet at `sheetStop`. Animations are off.
+    init(status: StatusModel, trail: [TrailPoint] = [], pending: Set<String> = [], mapEnabled: Bool = false, sheetStop: SheetStop = .full) {
         source = .fixed(status, trail: trail, pending: pending)
         self.mapEnabled = mapEnabled
         onOpenClimate = nil
         onOpenCharge = nil
         _runner = State(initialValue: CommandRunner(send: { _ in true }, wake: { true }))
+        stopDefaults = nil
+        _sheetStop = State(initialValue: sheetStop)
     }
 
     public var body: some View {
@@ -186,8 +199,37 @@ public struct StatusView: View {
                     .padding(.bottom, Tokens.Space.m)
             }
         } sheet: {
-            StatusSheet(model: status, pending: pending, actionsEnabled: actionsEnabled, actions: actions, docked: true, bottomInset: safeArea.bottom)
+            StatusSheet(
+                model: status, pending: pending, actionsEnabled: actionsEnabled, actions: actions,
+                docked: true, stop: sheetStop, bottomInset: safeArea.bottom,
+                onToggleStop: { move(to: sheetStop == .full ? .compact : .full) }
+            )
+            .offset(y: sheetDrag)
+            .gesture(sheetDragGesture)
         }
+    }
+
+    // MARK: Sheet stops
+
+    /// Dragging the docked sheet: it follows the finger (``SheetStop/offset(forDragging:)``), then snaps
+    /// to the stop the drag ends at (``SheetStop/after(dragging:predicted:)``).
+    private var sheetDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { sheetDrag = sheetStop.offset(forDragging: $0.translation.height) }
+            .onEnded { value in
+                let next = sheetStop.after(dragging: value.translation.height, predicted: value.predictedEndTranslation.height)
+                withAnimation(.snappy) {
+                    sheetDrag = 0
+                    move(to: next)
+                }
+            }
+    }
+
+    /// Rests the docked sheet at `stop` and remembers it for the next launch.
+    private func move(to stop: SheetStop) {
+        guard stop != sheetStop else { return }
+        withAnimation(.snappy) { sheetStop = stop }
+        if let stopDefaults { stop.save(to: stopDefaults) }
     }
 
     /// Mac and wide windows: map full-bleed, sheet as a floating panel on the trailing side.

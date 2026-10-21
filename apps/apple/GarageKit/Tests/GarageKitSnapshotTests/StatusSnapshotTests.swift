@@ -58,7 +58,7 @@ import Testing
         case live, stale, offline, pending, sparse
     }
 
-    private func status(_ fixture: Fixture) -> StatusView {
+    private func status(_ fixture: Fixture, stop: SheetStop = .full) -> StatusView {
         let now = Self.now
         let vehicle = Vehicle(
             id: UUID(uuidString: "7C1F0A0E-8A43-4D43-9A39-2F1B6F5D1E11")!,
@@ -147,7 +147,7 @@ import Testing
             locale: Locale(identifier: "en_GB"),
             timeZone: TimeZone(identifier: "UTC")!
         )
-        return StatusView(status: model, pending: pending, mapEnabled: false)
+        return StatusView(status: model, pending: pending, mapEnabled: false, sheetStop: stop)
     }
 
     // MARK: iPhone
@@ -157,6 +157,8 @@ import Testing
     @Test func status_offline_iphone() { check(status(.offline), on: .iPhone) }
     @Test func status_pending_iphone() { check(status(.pending), on: .iPhone) }
     @Test func status_sparse_iphone() { check(status(.sparse), on: .iPhone) }
+    /// The compact stop: numeral, charge line and quick actions, no tiles, more map.
+    @Test func status_live_iphone_compact() { check(status(.live, stop: .compact), on: .iPhone) }
     /// The first accessibility text size: tiles stack their captions, pills drop to the icon above
     /// or alone, and the sheet scrolls if it outgrows the screen.
     @Test func status_live_iphone_ax() { check(status(.live), on: .iPhoneAX1) }
