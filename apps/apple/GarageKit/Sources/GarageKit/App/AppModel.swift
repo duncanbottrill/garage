@@ -153,7 +153,15 @@ public final class AppModel {
             // Read live, so the Connection row turns red as soon as a send's token fetch fails.
             tokenFailure: { [weak self] in self?.commandClient.tokenFailure },
             // And offers "Reconnect Tesla" as soon as Tesla refuses the token after a refresh.
-            teslaRejected: { [weak self] in self?.commandClient.teslaRejected ?? false }
+            teslaRejected: { [weak self] in self?.commandClient.teslaRejected ?? false },
+            // "Wake the car": one wake_up after the view's confirmation, then follow the row online.
+            wake: { [weak self] in
+                guard let self, let vin = vehicleStore.vehicle?.vin else { throw CommandError.unreachable }
+                return try await commandClient.wake(vin: vin)
+            },
+            awaitAwake: { [weak self] in
+                await self?.vehicleStore.waitUntilAwake(timeout: CommandRunner.onlineWait) ?? true
+            }
         )
         more.onProxyOverrideChange = { [weak self] in self?.proxyOverrideChanged() }
         // The billed read's answer is the newest row there is: show it without waiting for Realtime.
@@ -307,8 +315,12 @@ public final class AppModel {
     // MARK: Internals
 
     /// `flow.handle(url:)` evaluates once itself (and keeps a callback `error` on screen), so no second refresh.
+    /// A clean callback that lands on done means Tesla accepted the reconnect: a `teslaRejected` left
+    /// by an earlier command is cleared now rather than by the next command that goes through.
     private func handleCallback(_ url: URL) async {
+        let clean = OnboardingFlow.callbackError(in: url) == nil
         guard await flow.handle(url: url) else { return }
+        if clean, flow.step == .done { commandClient.connectionRestored() }
         startMonitoringIfDone()
     }
 

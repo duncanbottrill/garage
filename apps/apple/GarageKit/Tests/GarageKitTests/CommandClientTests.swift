@@ -109,6 +109,18 @@ private struct Rig {
         #expect(!rig.client.teslaRejected)
     }
 
+    /// Reconnecting Tesla clears the mark without waiting for a command to prove it.
+    @Test func connectionRestoredClearsTeslaRejected() async throws {
+        let rig = Rig()
+        let unauthorized = StubReply.json(401, #"{"response":null,"error":"invalid bearer token"}"#)
+        rig.onCommand("door_lock", unauthorized, unauthorized)
+        await #expect(throws: CommandError.unauthorized) { try await rig.client.send(.doorLock, vin: Rig.vin) }
+        #expect(rig.client.teslaRejected)
+
+        rig.client.connectionRestored()
+        #expect(!rig.client.teslaRejected)
+    }
+
     @Test func ignoresDuplicateTapWhileInFlight() async throws {
         let rig = Rig()
         let (gate, open) = AsyncStream.makeStream(of: Void.self)

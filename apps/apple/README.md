@@ -132,6 +132,9 @@ notes) in the last column; the same lines go in the plan's execution record.
 | 6 | Charge port | On Wi-Fi and cellular: open, then close the port. | |
 | 7 | Frunk | On Wi-Fi and cellular: Frunk → confirm. The lid pops. | |
 | 8 | No wake without the prompt | With the car asleep, tap a command. The wake prompt appears; Cancel sends nothing (the car stays asleep, no wake in the usage ledger). | |
+| 8a | Wake, then the command goes | With the car asleep, tap a command and confirm Wake. The pill stays pending while the car comes online (up to 30 s) and the command then goes once, without a second tap or a "still waking" toast. | |
+| 8b | Wake from More | With the car asleep, More → Car shows "Wake the car". Wake asks first; Cancel sends nothing. Confirm: the detail reads "Waking…", then the row disappears as the car comes online and Status goes live. | |
+| 8c | Reconnect clears the refusal | After a "Tesla refused Garage's token · reconnect Tesla" Connection row, Reconnect Tesla and finish the sign-in. The row turns green at once, before any command. | |
 | 9 | Mac split layout and commands | On the Mac: the sidebar and the Status panel beside the map; lock/unlock and climate from the Mac. | |
 | 9a | Map pan and panel stops (iPhone) | Drag the map: it pans and stays put. Drag the panel down: it snaps to the compact stop (charge, range, pills; tiles gone, more map). Drag it up: the tiles return. Force-quit and relaunch: the panel opens at the stop you left it. | |
 | 10 | Bridge offline | Stop the bridge add-on for 2 min. Status shows "Telemetry paused since HH:mm" and the car becomes a solid dot (no halo). Start it again; both clear. | |

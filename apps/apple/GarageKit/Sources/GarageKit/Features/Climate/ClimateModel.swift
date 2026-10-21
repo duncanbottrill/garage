@@ -66,6 +66,8 @@ public final class ClimateModel {
     /// - Parameters:
     ///   - send: Sends a command (``CommandClient/send(_:vin:)`` for the car).
     ///   - wake: Wakes the car (``CommandClient/wake(vin:)``); only after the user confirms.
+    ///   - awaitAwake: Waits for the row to say the car is online after a confirmed wake
+    ///     (``CommandRunner/AwaitAwake``); the default does not wait.
     ///   - now: The clock (the runner's wake grace).
     ///   - locale: °C or °F for the inside temperature and target (``Units``).
     ///   - debounce: Quiet time before a target change is sent.
@@ -73,12 +75,13 @@ public final class ClimateModel {
     public init(
         send: @escaping CommandRunner.Send,
         wake: @escaping CommandRunner.Wake,
+        awaitAwake: @escaping CommandRunner.AwaitAwake = { true },
         now: @escaping @MainActor () -> Date = { .now },
         locale: Locale = .current,
         debounce: Duration = ClimateModel.defaultDebounce,
         hold: Duration = .seconds(30)
     ) {
-        runner = CommandRunner(send: send, wake: wake, now: now)
+        runner = CommandRunner(send: send, wake: wake, awaitAwake: awaitAwake, now: now)
         hvac = PendingOverlay(hold: hold)
         targetC = Self.defaultTarget
         confirmedTarget = Self.defaultTarget

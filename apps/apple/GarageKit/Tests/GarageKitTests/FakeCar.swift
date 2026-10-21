@@ -15,7 +15,14 @@ final class FakeCar {
     var asleepFailures = 0
     /// Every send throws this (after the asleep failures) while set.
     var failure: CommandError?
+    /// What ``awaitAwake`` answers: true = the row says the car is online.
+    var onlineAfterWake = true
+    /// While true, ``awaitAwake`` waits for ``comeOnline()``.
+    var holdingOnline = false
+    /// How many times ``awaitAwake`` was asked.
+    private(set) var onlineWaits = 0
     private var held: [CheckedContinuation<Void, Never>] = []
+    private var onlineWaiters: [CheckedContinuation<Void, Never>] = []
 
     var send: @MainActor (Command) async throws -> Bool {
         { [unowned self] command in try await self.perform(command) }
@@ -26,6 +33,30 @@ final class FakeCar {
             self.wakes += 1
             return true
         }
+    }
+
+    /// Stands in for the vehicle store's wait for `sleep_state` online after a wake.
+    var awaitAwake: @MainActor () async -> Bool {
+        { [unowned self] in
+            self.onlineWaits += 1
+            if self.holdingOnline {
+                // Like the store's wait, a cancelled wait returns (false) at once.
+                await withTaskCancellationHandler {
+                    await withCheckedContinuation { self.onlineWaiters.append($0) }
+                } onCancel: {
+                    Task { @MainActor in self.comeOnline() }
+                }
+            }
+            return self.onlineAfterWake && !Task.isCancelled
+        }
+    }
+
+    /// The row says online: every held ``awaitAwake`` returns.
+    func comeOnline() {
+        holdingOnline = false
+        let waiting = onlineWaiters
+        onlineWaiters = []
+        waiting.forEach { $0.resume() }
     }
 
     /// Sends recorded but not yet released.

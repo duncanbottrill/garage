@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Observation
 import os
 import Supabase
@@ -173,6 +174,41 @@ public final class VehicleStore {
     public static func resubscribeDelay(attempt: Int) -> Duration {
         let seconds = 2 * pow(2, Double(min(max(attempt, 0), 10)))
         return min(.seconds(seconds), resubscribeMaxDelay)
+    }
+
+    /// Whether the row says the car is asleep (`sleep_state` "asleep").
+    public var isAsleep: Bool { state?.sleepState?.lowercased() == "asleep" }
+
+    /// Waits until the row no longer says asleep (``isAsleep`` false) or `timeout` passes, following
+    /// the row through Observation rather than polling: the bridge flips `sleep_state` when the car
+    /// connects after a wake, and Realtime brings that row within a second or two. Returns true once
+    /// awake (at once if it already is), false when the timeout passes first or the task is cancelled.
+    public func waitUntilAwake(timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while isAsleep {
+            let remaining = deadline - .now
+            guard remaining > .zero, await nextStateChange(within: remaining) else { return false }
+        }
+        return true
+    }
+
+    /// Waits for the next change to ``state``. True when it changed, false when `limit` passed first
+    /// or the task was cancelled.
+    private func nextStateChange(within limit: Duration) async -> Bool {
+        let gate = ResumeGate<Bool>()
+        let timer = Task {
+            try? await Task.sleep(for: limit)
+            gate.fire(false)
+        }
+        defer { timer.cancel() }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                gate.arm(continuation)
+                withObservationTracking { _ = state } onChange: { gate.fire(true) }
+            }
+        } onCancel: {
+            gate.fire(false)
+        }
     }
 
     /// Fetches the vehicle and its row, then starts following Realtime. Returns once the feed is
@@ -406,4 +442,40 @@ public final class VehicleStore {
     }
 
     private static let logger = Logger(subsystem: "com.duncanbottrill.garage", category: "VehicleStore")
+}
+
+/// Resumes one continuation exactly once, with the value of whichever caller gets there first (an
+/// Observation change, a timer or a task cancellation); a value fired before the continuation is
+/// armed is delivered as soon as it is.
+private final class ResumeGate<Value: Sendable>: Sendable {
+    private enum State: Sendable { case idle, armed(CheckedContinuation<Value, Never>), fired(Value), done }
+    private let state = Mutex<State>(.idle)
+
+    func arm(_ continuation: CheckedContinuation<Value, Never>) {
+        let early = state.withLock { state -> Value? in
+            if case let .fired(value) = state {
+                state = .done
+                return value
+            }
+            state = .armed(continuation)
+            return nil
+        }
+        if let early { continuation.resume(returning: early) }
+    }
+
+    func fire(_ value: Value) {
+        let armed = state.withLock { state -> CheckedContinuation<Value, Never>? in
+            switch state {
+            case let .armed(continuation):
+                state = .done
+                return continuation
+            case .idle:
+                state = .fired(value)
+                return nil
+            case .fired, .done:
+                return nil
+            }
+        }
+        armed?.resume(returning: value)
+    }
 }

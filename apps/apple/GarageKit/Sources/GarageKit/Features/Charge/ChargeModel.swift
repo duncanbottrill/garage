@@ -88,6 +88,8 @@ public final class ChargeModel {
     /// - Parameters:
     ///   - send: Sends a command (``CommandClient/send(_:vin:)`` for the car).
     ///   - wake: Wakes the car (``CommandClient/wake(vin:)``); only after the user confirms.
+    ///   - awaitAwake: Waits for the row to say the car is online after a confirmed wake
+    ///     (``CommandRunner/AwaitAwake``); the default does not wait.
     ///   - now: The clock (schedule day, charge line, wake grace).
     ///   - timeZone: Where "minutes after midnight" is counted (the device's).
     ///   - debounce: Quiet time before a limit or schedule-time change is sent.
@@ -95,12 +97,13 @@ public final class ChargeModel {
     public init(
         send: @escaping CommandRunner.Send,
         wake: @escaping CommandRunner.Wake,
+        awaitAwake: @escaping CommandRunner.AwaitAwake = { true },
         now: @escaping @MainActor () -> Date = { .now },
         timeZone: TimeZone = .current,
         debounce: Duration = ChargeModel.defaultDebounce,
         hold: Duration = .seconds(30)
     ) {
-        runner = CommandRunner(send: send, wake: wake, now: now)
+        runner = CommandRunner(send: send, wake: wake, awaitAwake: awaitAwake, now: now)
         charging = PendingOverlay(hold: hold)
         port = PendingOverlay(hold: hold)
         limit = PendingOverlay(hold: hold)

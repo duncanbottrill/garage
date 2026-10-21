@@ -4,7 +4,8 @@ import SwiftUI
 /// its rows on one glass tile; a row is an icon, a title, a detail line and a trailing status dot
 /// (healthy, warning, failed), with its controls under it.
 ///
-/// Rows: Connection (with "Reconnect Tesla" when the token rotation failed), Bridge, Budget, Refresh
+/// Rows: Connection (with "Reconnect Tesla" when the token rotation failed), Bridge, Budget, Wake the
+/// car (only while the car is asleep; "Wake" asks first, then sends one `wake_up`), Refresh
 /// now (only while telemetry is stale and the car awake), Proxy URL (published value, editable
 /// override, "Test"), Tailscale ("Open Tailscale"), Account ("Link Apple ID", "Sign out") and About
 /// (version and licences). See ``MoreModel``.
@@ -25,6 +26,7 @@ public struct MoreView: View {
     @State private var draft = ""
     @State private var draftRejected = false
     @State private var linking = false
+    @State private var confirmingWake = false
     @State private var accountMessage: String?
     @State private var confirmingSignOut = false
     @State private var shownLicence: MoreModel.Licence?
@@ -66,6 +68,12 @@ public struct MoreView: View {
         .confirmationDialog("Sign out of Garage on this device?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { Task { await actions.signOut() } }
             Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog(WakePrompt.title, isPresented: $confirmingWake, titleVisibility: .visible) {
+            Button(WakePrompt.wakeButton) { Task { await more.wakeNow() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(WakePrompt.wakeOnlyMessage)
         }
         .sheet(item: $shownLicence) { LicenceSheet(licence: $0) }
         .modifier(LiveInputs(app: app, more: more))
@@ -114,6 +122,8 @@ public struct MoreView: View {
             MoreButton(title: "Refresh", isWorking: more.refreshPhase == .refreshing) {
                 Task { await more.refreshNow() }
             }
+        } else if row.id == .wake {
+            MoreButton(title: WakePrompt.wakeButton, isWorking: more.wakePhase == .waking) { confirmingWake = true }
         } else {
             StatusDot(tone: row.tone)
         }

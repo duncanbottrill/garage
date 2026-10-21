@@ -390,4 +390,11 @@ private func freshDefaults() -> UserDefaults {
         #expect(OnboardingFlow.isConnectedCallback(try #require(URL(string: "GARAGE://connected?ok=1"))))
         #expect(!OnboardingFlow.isConnectedCallback(try #require(URL(string: "garage://other"))))
     }
+
+    /// The callback's `error` item is read the same way by the flow and the app model.
+    @Test func callbackErrorReadsTheQueryItem() {
+        #expect(OnboardingFlow.callbackError(in: URL(string: "garage://connected")!) == nil)
+        #expect(OnboardingFlow.callbackError(in: URL(string: "garage://connected?auth_callback=1")!) == nil)
+        #expect(OnboardingFlow.callbackError(in: URL(string: "garage://connected?error=access_denied")!) == "access_denied")
+    }
 }

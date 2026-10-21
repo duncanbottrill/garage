@@ -6,7 +6,7 @@ import Testing
 /// short window after a Cancel.
 @MainActor @Suite struct CommandRunnerTests {
     private func runner(_ car: FakeCar, clock: TestClock, asleep: Bool = true) -> CommandRunner {
-        let runner = CommandRunner(send: car.send, wake: car.wake, now: clock.read)
+        let runner = CommandRunner(send: car.send, wake: car.wake, awaitAwake: car.awaitAwake, now: clock.read)
         runner.isAsleep = { asleep }
         runner.hostsPrompt = true
         return runner
@@ -118,6 +118,94 @@ import Testing
         #expect(await runner.run(.flashLights) == .declined)
         #expect(!runner.isAskingToWake)
         #expect(car.wakes == 0)
+        #expect(car.sent.isEmpty)
+    }
+
+    /// After the Wake tap the command is held until the row says the car is online, then sent once.
+    @Test func waitsForOnlineAfterWakeBeforeSending() async {
+        let car = FakeCar()
+        car.holdingOnline = true
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+        let run = Task { await runner.run(.flashLights) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.confirmWake()
+        #expect(await eventually { car.wakes == 1 && car.onlineWaits == 1 })
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(car.sent.isEmpty, "nothing is sent while the row still says asleep")
+
+        car.comeOnline()
+        #expect(await run.value == .sent)
+        #expect(car.sent == [.flashLights])
+    }
+
+    /// If the row never flips inside the wait, the command still goes once (and an asleep answer
+    /// then reads as still waking).
+    @Test func sendsOnceWhenOnlineWaitGivesUp() async {
+        let car = FakeCar()
+        car.onlineAfterWake = false
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+        await wakeAndSend(runner)
+        #expect(car.onlineWaits == 1)
+        #expect(car.sent == [.flashLights])
+
+        car.asleepFailures = 1
+        #expect(await runner.run(.honkHorn) == .failed)
+        #expect(runner.toast?.message == CommandRunner.stillWakingMessage)
+    }
+
+    /// A different command tapped while the car is coming online joins the wait instead of going out
+    /// early (inside the grace the prompt is skipped, but the car is not up yet).
+    @Test func commandDuringOnlineWaitJoinsIt() async {
+        let car = FakeCar()
+        car.holdingOnline = true
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+        let first = Task { await runner.run(.flashLights) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.confirmWake()
+        #expect(await eventually { car.onlineWaits == 1 })
+        #expect(!runner.needsWakePrompt, "inside the grace")
+
+        let second = Task { await runner.run(.honkHorn) }
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(car.sent.isEmpty)
+        #expect(!runner.isAskingToWake)
+
+        car.comeOnline()
+        #expect(await first.value == .sent)
+        #expect(await second.value == .sent)
+        #expect(Set(car.sent) == [.flashLights, .honkHorn])
+        #expect(car.wakes == 1)
+    }
+
+    /// Cancelling while the car is coming online (the host going away, a sheet covering it) declines
+    /// the woken commands: nothing is sent late.
+    @Test func cancelDuringOnlineWaitDeclines() async {
+        let car = FakeCar()
+        car.holdingOnline = true
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+        let run = Task { await runner.run(.actuateFrunk) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.confirmWake()
+        #expect(await eventually { car.onlineWaits == 1 })
+
+        runner.cancelWake()
+        #expect(await run.value == .declined)
+        #expect(car.sent.isEmpty)
+        #expect(car.wakes == 1)
+
+        // The cover does the same.
+        car.holdingOnline = true
+        clock.advance(130) // past the grace, so the prompt asks again
+        let again = Task { await runner.run(.actuateFrunk) }
+        #expect(await eventually { runner.isAskingToWake })
+        runner.confirmWake()
+        #expect(await eventually { car.onlineWaits == 2 })
+        runner.isCovered = true
+        #expect(await again.value == .declined)
         #expect(car.sent.isEmpty)
     }
 }

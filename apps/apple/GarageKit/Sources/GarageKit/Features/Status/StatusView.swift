@@ -76,7 +76,7 @@ public struct StatusView: View {
         self.onOpenClimate = onOpenClimate
         self.onOpenCharge = onOpenCharge
         let commands = Self.commands(model)
-        let runner = CommandRunner(send: commands.send, wake: commands.wake)
+        let runner = CommandRunner(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake)
         runner.isAsleep = { [weak model] in model?.vehicleStore.state?.sleepState?.lowercased() == "asleep" }
         _runner = State(initialValue: runner)
         stopDefaults = .standard
@@ -311,8 +311,8 @@ public struct StatusView: View {
         Task { await runner.run(.actuateFrunk) }
     }
 
-    /// `send` and `wake` for the app's car, read at call time (the client is replaced on sign-out).
-    private static func commands(_ app: AppModel) -> (send: CommandRunner.Send, wake: CommandRunner.Wake) {
+    /// `send`, `wake` and `awaitAwake` for the app's car, read at call time (the client is replaced on sign-out).
+    private static func commands(_ app: AppModel) -> (send: CommandRunner.Send, wake: CommandRunner.Wake, awaitAwake: CommandRunner.AwaitAwake) {
         let send: CommandRunner.Send = { [weak app] command in
             guard let app, let vin = app.vehicleStore.vehicle?.vin else { throw CommandError.unreachable }
             return try await app.commandClient.send(command, vin: vin)
@@ -321,7 +321,10 @@ public struct StatusView: View {
             guard let app, let vin = app.vehicleStore.vehicle?.vin else { throw CommandError.unreachable }
             return try await app.commandClient.wake(vin: vin)
         }
-        return (send, wake)
+        let awaitAwake: CommandRunner.AwaitAwake = { [weak app] in
+            await app?.vehicleStore.waitUntilAwake(timeout: CommandRunner.onlineWait) ?? true
+        }
+        return (send, wake, awaitAwake)
     }
 
     // MARK: Sheets
@@ -331,9 +334,9 @@ public struct StatusView: View {
         let commands = Self.commands(app)
         switch kind {
         case .climate where climate == nil:
-            climate = ClimateModel(send: commands.send, wake: commands.wake)
+            climate = ClimateModel(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake)
         case .charge where charge == nil:
-            charge = ChargeModel(send: commands.send, wake: commands.wake)
+            charge = ChargeModel(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake)
         default:
             break
         }
