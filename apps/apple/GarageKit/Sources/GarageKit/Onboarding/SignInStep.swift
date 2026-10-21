@@ -39,8 +39,8 @@ public struct SignInStep: View {
     public var body: some View {
         OnboardingStepLayout(
             step: .signIn,
-            title: "Sign in to Garage",
-            message: "Your Garage account holds the car's data. Sign in with Apple, or use email.",
+            title: "Sign in to Mews",
+            message: "Your Mews account holds the car's data. Sign in with Apple, or use email.",
             errorMessage: errorMessage
         ) {
             VStack(spacing: Tokens.Space.l) {

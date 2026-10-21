@@ -120,13 +120,13 @@ public enum APIError: Error, Sendable, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .unauthorized: "Your Garage session has ended. Sign in again."
-        case .notConnected: "Garage isn't connected to Tesla. Connect Tesla to continue."
-        case .tokenUnavailable: "Tesla isn't answering Garage right now. Try again in a few minutes."
+        case .unauthorized: "Your Mews session has ended. Sign in again."
+        case .notConnected: "Mews isn't connected to Tesla. Connect Tesla to continue."
+        case .tokenUnavailable: "Tesla isn't answering Mews right now. Try again in a few minutes."
         case .asleep: "The car is asleep."
         case .rateLimited: "Too many requests in a short time. Try again in a minute."
-        case .budgetMinimal: "This month's Tesla budget is nearly spent, so Garage is saving it. Check Budget in More."
-        case let .server(status): "The Garage server had a problem (\(status)). Try again shortly."
+        case .budgetMinimal: "This month's Tesla budget is nearly spent, so Mews is saving it. Check Budget in More."
+        case let .server(status): "The Mews server had a problem (\(status)). Try again shortly."
         }
     }
 }

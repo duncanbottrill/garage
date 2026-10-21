@@ -59,9 +59,9 @@ public struct TailscaleStep: View {
     private var statusText: String {
         switch proxyState {
         case .unknown:
-            "The bridge hasn't published its address yet. Check that the Garage add-on is running at home."
+            "The bridge hasn't published its address yet. Check that the Garage Bridge add-on is running at home."
         case .unreachable, .reachable:
-            "Garage can't reach the bridge from this device yet."
+            "Mews can't reach the bridge from this device yet."
         }
     }
 }

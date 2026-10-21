@@ -225,10 +225,10 @@ public final class OnboardingFlow {
     /// shown: the backend may put exception text there.
     public static func callbackMessage(for code: String) -> String {
         switch code {
-        case "access_denied": "Tesla access wasn't allowed. Connect again and approve Garage's permissions."
+        case "access_denied": "Tesla access wasn't allowed. Connect again and approve the permissions Mews asks for."
         // The backend sends `bad_state` for an unknown or expired OAuth state.
         case "state_mismatch", "bad_state": "The Tesla sign-in expired or came from another attempt. Connect again."
-        case "token_exchange_failed": "Tesla signed you in, but Garage couldn't finish connecting. Try again in a minute."
+        case "token_exchange_failed": "Tesla signed you in, but Mews couldn't finish connecting. Try again in a minute."
         default: "Tesla sign-in didn't complete. Try again."
         }
     }
@@ -252,7 +252,7 @@ public final class OnboardingFlow {
     /// Copy for a failure: the error's own description when it has one, a generic line otherwise.
     static func message(for error: any Error) -> String {
         if let error = error as? APIError, let text = error.errorDescription { return text }
-        if error is URLError { return "Garage can't reach the internet right now. Check the connection and try again." }
+        if error is URLError { return "Mews can't reach the internet right now. Check the connection and try again." }
         if let text = (error as? LocalizedError)?.errorDescription { return text }
         return "Something went wrong. Try again."
     }

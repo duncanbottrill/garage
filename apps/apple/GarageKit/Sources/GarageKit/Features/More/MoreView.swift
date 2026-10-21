@@ -65,7 +65,7 @@ public struct MoreView: View {
         .scrollBounceBehavior(.basedOnSize)
         .refreshable { await more.loadConnection() }
         .background(Tokens.Colors.background.ignoresSafeArea())
-        .confirmationDialog("Sign out of Garage on this device?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
+        .confirmationDialog("Sign out of Mews on this device?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { Task { await actions.signOut() } }
             Button("Cancel", role: .cancel) {}
         }

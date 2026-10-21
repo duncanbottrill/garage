@@ -28,11 +28,11 @@ public enum CommandError: Error, Sendable, Equatable, LocalizedError {
         case .unreachable:
             "Can't reach your home bridge. Check that Tailscale is on, then try again."
         case .unauthorized:
-            "Tesla didn't accept Garage's sign-in. Reconnect Tesla in More."
+            "Tesla didn't accept the Mews sign-in. Reconnect Tesla in More."
         case .asleep:
             "The car is asleep. Wake it to send this."
         case .keyMissing:
-            "The car hasn't paired Garage's key yet. Pair the key, then try again."
+            "The car hasn't paired the Mews key yet. Pair the key, then try again."
         case let .rejected(reason):
             "That didn't go through (\(reason)). Check the car, then try again."
         case .timeout:
@@ -41,12 +41,12 @@ public enum CommandError: Error, Sendable, Equatable, LocalizedError {
             "This month's Tesla budget is spent, so commands are paused. Check Budget in More."
         case let .tokenUnavailable(retryAt):
             if let retryAt {
-                "Garage is renewing its Tesla access. Try again in a few minutes, after \(Self.clockTime(retryAt))."
+                "Mews is renewing its Tesla access. Try again in a few minutes, after \(Self.clockTime(retryAt))."
             } else {
-                "Garage is renewing its Tesla access. Try again in a few minutes."
+                "Mews is renewing its Tesla access. Try again in a few minutes."
             }
         case .sessionExpired:
-            "Your Garage sign-in has expired. Sign in again in More."
+            "Your Mews sign-in has expired. Sign in again in More."
         }
     }
 

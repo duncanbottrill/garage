@@ -303,7 +303,7 @@ public final class MoreModel {
     }
 
     /// The Connection row's detail after Tesla refused the token (``CommandClient/teslaRejected``).
-    public static let teslaRejectedDetail = "Tesla refused Garage's token · reconnect Tesla"
+    public static let teslaRejectedDetail = "Tesla refused the Mews token · reconnect Tesla"
 
     /// The Connection row's detail for a token failure.
     public static func tokenFailureDetail(_ failure: CommandError) -> String {
@@ -313,11 +313,11 @@ public final class MoreModel {
         case .tokenUnavailable(nil):
             "Renewing Tesla access · commands paused"
         case .sessionExpired:
-            "Your Garage sign-in was refused"
+            "Your Mews sign-in was refused"
         case .unauthorized:
             "No Tesla token · reconnect Tesla"
         default:
-            "Garage couldn't get a Tesla token · try again later"
+            "Mews couldn't get a Tesla token · try again later"
         }
     }
 
@@ -594,7 +594,7 @@ public final class MoreModel {
     }
 
     private var aboutRow: Row {
-        Row(id: .about, icon: .info, title: "Garage", detail: "Version \(appVersion.text)", tone: .neutral)
+        Row(id: .about, icon: .info, title: "Mews", detail: "Version \(appVersion.text)", tone: .neutral)
     }
 
     /// Copy rule: relative only under an hour ("just now", "4 min ago"), then a clock time
