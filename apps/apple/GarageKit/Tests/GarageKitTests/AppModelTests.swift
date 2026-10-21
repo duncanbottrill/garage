@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Supabase
 import Testing
 @testable import GarageKit
@@ -223,7 +224,9 @@ extension AppModelTests {
         proxy.on("POST", "/api/1/vehicles/VIN/command/door_lock") { _ in .json(200, #"{"response":{"result":true,"reason":""}}"#) }
         let defaults = UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)")!
         ProxyOverride.set(proxy.baseURL(port: 4443), in: defaults)
-        let cache = FileSnapshotCache(url: try Fixture.temporaryDirectory().appendingPathComponent("vehicle_state.json"))
+        let directory = try Fixture.temporaryDirectory()
+        let cache = FileSnapshotCache(url: directory.appendingPathComponent("vehicle_state.json"))
+        let usageStore = FileUsageStore(url: directory.appendingPathComponent("usage.json"))
         let config = SupabaseEnvironment.Config(
             supabaseURL: URL(string: "https://stub-\(UUID().uuidString).test")!,
             publishableKey: "sb_publishable_test",
@@ -233,6 +236,7 @@ extension AppModelTests {
             environment: SupabaseEnvironment(config: config, authStorage: MemoryAuthStorage()),
             defaults: defaults,
             cache: cache,
+            usageStore: usageStore,
             checks: nil,
             endSession: {},
             api: GarageAPI(baseURL: backend.baseURL(), session: backend.session, supabaseToken: { "sb-jwt" }),
@@ -242,10 +246,78 @@ extension AppModelTests {
 
         let start = ContinuousClock.now
         #expect(try await model.commandClient.send(.doorLock, vin: "VIN"))
+        #expect(usageStore.load()?.counts == [.commands: 1], "the count is on disk before any request")
         model.didEnterBackground()
         #expect(await eventually { backend.requests("POST", "/api/usage").count == 1 })
         #expect(ContinuousClock.now - start < UsageReporter.defaultCoalesce, "sent on backgrounding, not after the batching wait")
-        #expect(backend.requests("POST", "/api/usage").first?.jsonBody == ["category": "commands", "count": 1])
+        let body = backend.requests("POST", "/api/usage").first?.jsonBody
+        #expect(body?["category"] as? String == "commands")
+        #expect(body?["count"] as? Int == 1)
+        #expect((body?["report_id"] as? String).flatMap(UUID.init) != nil)
+        #expect(await eventually { usageStore.load() == nil }, "acknowledged: nothing left on disk")
+        // Going inactive (before the background on iOS, the usual last phase on macOS) flushes too.
+        #expect(try await model.commandClient.send(.doorLock, vin: "VIN"))
+        model.willResignActive()
+        #expect(await eventually { backend.requests("POST", "/api/usage").count == 2 })
+    }
+
+    /// Sign-out sends the counts still waiting first (they need this account's session), then drops
+    /// whatever the backend did not take, so the next account never inherits them. A count recorded
+    /// on the next launch starts a fresh ledger.
+    @Test func signOutDrainsUsageThenDiscardsIt() async throws {
+        let backend = URLStub()
+        let proxy = URLStub()
+        backend.on("GET", "/api/token") { _ in .json(200, #"{"access_token":"tesla-1","expires_at":"2099-01-01T00:00:00Z"}"#) }
+        proxy.on("POST", "/api/1/vehicles/VIN/command/door_lock") { _ in .json(200, #"{"response":{"result":true,"reason":""}}"#) }
+        let defaults = UserDefaults(suiteName: "AppModelTests-\(UUID().uuidString)")!
+        ProxyOverride.set(proxy.baseURL(port: 4443), in: defaults)
+        let directory = try Fixture.temporaryDirectory()
+        let cache = FileSnapshotCache(url: directory.appendingPathComponent("vehicle_state.json"))
+        let usageStore = FileUsageStore(url: directory.appendingPathComponent("usage.json"))
+        let config = SupabaseEnvironment.Config(
+            supabaseURL: URL(string: "https://stub-\(UUID().uuidString).test")!,
+            publishableKey: "sb_publishable_test",
+            apiBaseURL: backend.baseURL()
+        )
+        let order = Mutex<[String]>([])
+        backend.on("POST", "/api/usage") { _ in
+            order.withLock { $0.append("usage") }
+            return .json(200, #"{"ok":true}"#)
+        }
+        let model = AppModel(
+            environment: SupabaseEnvironment(config: config, authStorage: MemoryAuthStorage()),
+            defaults: defaults,
+            cache: cache,
+            usageStore: usageStore,
+            checks: nil,
+            endSession: { order.withLock { $0.append("endSession") } },
+            api: GarageAPI(baseURL: backend.baseURL(), session: backend.session, supabaseToken: { "sb-jwt" }),
+            makeStore: { VehicleStore(feed: IdleFeed(), fetcher: NoRows(), cache: cache) },
+            proxySession: proxy.session
+        )
+        #expect(try await model.commandClient.send(.doorLock, vin: "VIN"))
+        #expect(usageStore.load()?.counts == [.commands: 1])
+
+        let start = ContinuousClock.now
+        await model.signOut()
+        #expect(ContinuousClock.now - start < UsageReporter.defaultCoalesce, "the drain skips the batching wait")
+        #expect(order.withLock { $0 } == ["usage", "endSession"], "the report goes out while the session is still there")
+        #expect(usageStore.load() == nil)
+
+        // The backend never answering: sign-out still completes inside the drain timeout, and the
+        // unanswered batch is discarded rather than left for the next account. (Sign-out cleared
+        // the proxy override with the account; put it back for this second round.)
+        ProxyOverride.set(proxy.baseURL(port: 4443), in: defaults)
+        backend.on("POST", "/api/usage") { _ in
+            try? await Task.sleep(for: .seconds(30))
+            return .json(200, #"{"ok":true}"#)
+        }
+        #expect(try await model.commandClient.send(.doorLock, vin: "VIN"))
+        let again = ContinuousClock.now
+        await model.signOut()
+        #expect(ContinuousClock.now - again < AppModel.signOutDrain + .seconds(1))
+        #expect(ContinuousClock.now - again >= AppModel.signOutDrain)
+        #expect(usageStore.load() == nil)
     }
 
     /// Going to the background writes the store's pending snapshot.

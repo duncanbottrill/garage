@@ -78,6 +78,7 @@ public struct StatusView: View {
         let commands = Self.commands(model)
         let runner = CommandRunner(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake)
         runner.isAsleep = { [weak model] in model?.vehicleStore.state?.sleepState?.lowercased() == "asleep" }
+        runner.lastWakeElsewhere = commands.lastWake
         _runner = State(initialValue: runner)
         stopDefaults = .standard
         _sheetStop = State(initialValue: SheetStop.saved(in: .standard))
@@ -311,8 +312,9 @@ public struct StatusView: View {
         Task { await runner.run(.actuateFrunk) }
     }
 
-    /// `send`, `wake` and `awaitAwake` for the app's car, read at call time (the client is replaced on sign-out).
-    private static func commands(_ app: AppModel) -> (send: CommandRunner.Send, wake: CommandRunner.Wake, awaitAwake: CommandRunner.AwaitAwake) {
+    /// `send`, `wake`, `awaitAwake` and `lastWake` for the app's car, read at call time (the client is
+    /// replaced on sign-out).
+    private static func commands(_ app: AppModel) -> (send: CommandRunner.Send, wake: CommandRunner.Wake, awaitAwake: CommandRunner.AwaitAwake, lastWake: @MainActor () -> Date?) {
         let send: CommandRunner.Send = { [weak app] command in
             guard let app, let vin = app.vehicleStore.vehicle?.vin else { throw CommandError.unreachable }
             return try await app.commandClient.send(command, vin: vin)
@@ -324,7 +326,9 @@ public struct StatusView: View {
         let awaitAwake: CommandRunner.AwaitAwake = { [weak app] in
             await app?.vehicleStore.waitUntilAwake(timeout: CommandRunner.onlineWait) ?? true
         }
-        return (send, wake, awaitAwake)
+        // One clock for every surface: a wake confirmed in a sheet, or from More, is Status's grace too.
+        let lastWake: @MainActor () -> Date? = { [weak app] in app?.commandClient.lastWakeAt }
+        return (send, wake, awaitAwake, lastWake)
     }
 
     // MARK: Sheets
@@ -334,9 +338,9 @@ public struct StatusView: View {
         let commands = Self.commands(app)
         switch kind {
         case .climate where climate == nil:
-            climate = ClimateModel(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake)
+            climate = ClimateModel(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake, lastWake: commands.lastWake)
         case .charge where charge == nil:
-            charge = ChargeModel(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake)
+            charge = ChargeModel(send: commands.send, wake: commands.wake, awaitAwake: commands.awaitAwake, lastWake: commands.lastWake)
         default:
             break
         }

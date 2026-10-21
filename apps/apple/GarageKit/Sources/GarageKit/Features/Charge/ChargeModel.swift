@@ -90,6 +90,8 @@ public final class ChargeModel {
     ///   - wake: Wakes the car (``CommandClient/wake(vin:)``); only after the user confirms.
     ///   - awaitAwake: Waits for the row to say the car is online after a confirmed wake
     ///     (``CommandRunner/AwaitAwake``); the default does not wait.
+    ///   - lastWake: When the car was last woken through any surface (``CommandClient/lastWakeAt``),
+    ///     so a wake confirmed elsewhere is this sheet's grace too; the default knows of none.
     ///   - now: The clock (schedule day, charge line, wake grace).
     ///   - timeZone: Where "minutes after midnight" is counted (the device's).
     ///   - debounce: Quiet time before a limit or schedule-time change is sent.
@@ -98,6 +100,7 @@ public final class ChargeModel {
         send: @escaping CommandRunner.Send,
         wake: @escaping CommandRunner.Wake,
         awaitAwake: @escaping CommandRunner.AwaitAwake = { true },
+        lastWake: @escaping @MainActor () -> Date? = { nil },
         now: @escaping @MainActor () -> Date = { .now },
         timeZone: TimeZone = .current,
         debounce: Duration = ChargeModel.defaultDebounce,
@@ -116,6 +119,7 @@ public final class ChargeModel {
         calendar.timeZone = timeZone
         self.calendar = calendar
         runner.isAsleep = { [weak self] in self?.state?.sleepState?.lowercased() == "asleep" }
+        runner.lastWakeElsewhere = lastWake
         limitSender.deliver = { [weak self] in await self?.deliverLimit($0) }
         scheduleSender.deliver = { [weak self] in await self?.deliverSchedule($0) }
     }

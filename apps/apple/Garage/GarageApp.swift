@@ -30,6 +30,10 @@ struct GarageApp: App {
                 case .background:
                     // Write the snapshot the store is holding back (Realtime rows are cached at most every 5 s).
                     model.didEnterBackground()
+                case .inactive:
+                    // Send the usage counts still waiting while a request can still go out (on macOS
+                    // this is often the only phase change before a quit).
+                    model.willResignActive()
                 case .active:
                     // Back in the foreground: re-check onboarding, which also starts the store when the
                     // launch check ran offline. Skipped while the launch evaluation is still running.

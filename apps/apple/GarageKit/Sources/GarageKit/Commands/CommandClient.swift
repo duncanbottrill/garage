@@ -42,6 +42,10 @@ public final class CommandClient {
     /// fetched fine, but Tesla no longer accepts it, so the owner has to reconnect Tesla. Cleared by
     /// the next send that goes through, or by ``connectionRestored()``.
     public private(set) var teslaRejected = false
+    /// When the last wake this client sent went through (``wake(vin:)``). Every surface's
+    /// ``CommandRunner`` reads it, so a wake confirmed in a sheet, or from More, is the grace for
+    /// all of them; nil until the first wake of this session.
+    public private(set) var lastWakeAt: Date?
 
     /// Clears ``teslaRejected``: the owner has just reconnected Tesla (the `garage://connected`
     /// callback came back clean), so the refusal is history before the next command proves it.
@@ -85,8 +89,8 @@ public final class CommandClient {
     }
 
     /// A client wired to the Garage backend: tokens and usage through `api`.
-    public convenience init(api: GarageAPI, proxyBaseURL: @escaping @MainActor () -> URL?) {
-        self.init(proxyBaseURL: proxyBaseURL, tokens: TokenProvider(api: api), usage: UsageReporter(api: api))
+    public convenience init(api: GarageAPI, proxyBaseURL: @escaping @MainActor () -> URL?, usageStore: (any UsageStore)? = FileUsageStore()) {
+        self.init(proxyBaseURL: proxyBaseURL, tokens: TokenProvider(api: api), usage: UsageReporter(api: api, store: usageStore))
     }
 
     /// Sends `command` to the car with this VIN and counts it in the usage ledger on success.
@@ -140,6 +144,7 @@ public final class CommandClient {
             throw CommandError.rejected(reason: "Unexpected error: \(error.localizedDescription)")
         }
         teslaRejected = false
+        if kind == .wake { lastWakeAt = .now }
         usage.record(kind == .wake ? .wakes : .commands)
         return true
     }
@@ -148,6 +153,20 @@ public final class CommandClient {
     /// background, so a command sent just before suspension is still counted.
     public func flushUsage() {
         usage.flush()
+    }
+
+    /// Sends the usage counts waiting now and waits for the backend to take them, at most `timeout`
+    /// (sign-out: the counts need this account's session). What is not delivered in time stays in
+    /// the store until ``discardUsage()``.
+    /// - Returns: Whether everything was delivered (or given up on) in time.
+    public func drainUsage(timeout: Duration) async -> Bool {
+        await usage.drain(timeout: timeout)
+    }
+
+    /// Drops every usage count not yet acknowledged, in memory and on disk (sign-out: they belong to
+    /// the account that is leaving).
+    public func discardUsage() {
+        usage.discard()
     }
 
     private static func encode(_ body: [String: AnyCodable]) throws -> Data {

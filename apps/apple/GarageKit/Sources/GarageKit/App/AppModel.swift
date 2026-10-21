@@ -36,6 +36,8 @@ public final class AppModel {
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let cache: FileSnapshotCache
+    /// Where the usage counts the backend has not acknowledged wait between launches; discarded on sign-out.
+    @ObservationIgnored private let usageStore: FileUsageStore
     @ObservationIgnored private let appleAuthorizer = AppleAuthorizer()
     @ObservationIgnored private let webAuthenticator = WebAuthenticator()
     /// The nonce for the Sign in with Apple button's request, between `onRequest` and `onCompletion`.
@@ -63,8 +65,9 @@ public final class AppModel {
     ///   - environment: The Supabase project and API.
     ///   - defaults: Where the chosen vehicle and onboarding completion are kept.
     ///   - cache: The snapshot cache the store opens on, cleared on sign-out.
-    public convenience init(environment: SupabaseEnvironment, defaults: UserDefaults = .standard, cache: FileSnapshotCache = FileSnapshotCache()) {
-        self.init(environment: environment, defaults: defaults, cache: cache, checks: nil, endSession: nil)
+    ///   - usageStore: Where unacknowledged usage counts wait between launches, discarded on sign-out.
+    public convenience init(environment: SupabaseEnvironment, defaults: UserDefaults = .standard, cache: FileSnapshotCache = FileSnapshotCache(), usageStore: FileUsageStore = FileUsageStore()) {
+        self.init(environment: environment, defaults: defaults, cache: cache, usageStore: usageStore, checks: nil, endSession: nil)
     }
 
     /// The designated init; tests replace the onboarding checks, the session ending, the backend,
@@ -73,6 +76,7 @@ public final class AppModel {
         environment: SupabaseEnvironment,
         defaults: UserDefaults,
         cache: FileSnapshotCache,
+        usageStore: FileUsageStore = FileUsageStore(),
         checks: OnboardingFlow.Checks?,
         endSession: (@MainActor () async -> Void)?,
         api: GarageAPI? = nil,
@@ -83,11 +87,12 @@ public final class AppModel {
         self.environment = environment
         self.defaults = defaults
         self.cache = cache
+        self.usageStore = usageStore
         self.api = api ?? GarageAPI(environment: environment)
         storeFactory = makeStore ?? { Self.makeStore(environment: environment, cache: cache, defaults: defaults) }
         self.proxySession = proxySession
         vehicleStore = storeFactory()
-        commandClient = Self.makeCommandClient(api: self.api, owner: owner, session: proxySession)
+        commandClient = Self.makeCommandClient(api: self.api, owner: owner, session: proxySession, usageStore: usageStore)
         user = environment.client.auth.currentUser
         // A session and a finished onboarding on this device: open on Status (and its cached snapshot)
         // straight away; the first evaluation moves elsewhere only if something has changed.
@@ -209,6 +214,13 @@ public final class AppModel {
         commandClient.flushUsage()
     }
 
+    /// Call when the scene goes inactive (before the background on iOS; losing the front on macOS,
+    /// where the background phase rarely follows): sends the usage counts waiting for their window
+    /// while there is still time for the request.
+    public func willResignActive() {
+        commandClient.flushUsage()
+    }
+
     /// Handles a URL opened by the app (`onOpenURL`). `garage://connected` re-evaluates onboarding.
     public func handle(url: URL) {
         Task { await handleCallback(url) }
@@ -271,9 +283,15 @@ public final class AppModel {
         user = (try? await client.auth.user()) ?? session.user
     }
 
+    /// How long sign-out waits for the unacknowledged usage counts to reach the backend.
+    public static let signOutDrain: Duration = .seconds(3)
+
     /// Signs out of this device only (the owner's other devices stay signed in), clears the snapshot
     /// cache (it holds the car's location), forgets the chosen vehicle and returns to the sign-in step.
+    /// The usage counts still waiting go first (they need this account's session); whatever is not
+    /// taken within ``signOutDrain`` is dropped with the account.
     public func signOut() async {
+        _ = await commandClient.drainUsage(timeout: Self.signOutDrain)
         await endSession()
         resetAfterSignOut()
     }
@@ -371,6 +389,8 @@ public final class AppModel {
         vehicleStore.stop()
         commandClient.reachabilityMonitor.stop()
         reachabilityRunning = false
+        // Counts not yet acknowledged belong to this account; the next one must not inherit them.
+        commandClient.discardUsage()
         cache.clear()
         VehicleSelection.set(nil, in: defaults)
         // The override points at this account's bridge; the next account starts on its published URL.
@@ -381,7 +401,7 @@ public final class AppModel {
         let owner = WeakModel()
         owner.model = self
         vehicleStore = storeFactory()
-        commandClient = Self.makeCommandClient(api: api, owner: owner, session: proxySession)
+        commandClient = Self.makeCommandClient(api: api, owner: owner, session: proxySession, usageStore: usageStore)
         user = nil
         flow.reset()
     }
@@ -395,11 +415,12 @@ public final class AppModel {
         )
     }
 
-    private static func makeCommandClient(api: GarageAPI, owner: WeakModel, session: URLSession?) -> CommandClient {
+    private static func makeCommandClient(api: GarageAPI, owner: WeakModel, session: URLSession?, usageStore: FileUsageStore) -> CommandClient {
         // Read per send and per probe, so a newly published URL or a changed override is picked up.
         let proxyBaseURL: @MainActor () -> URL? = { owner.model?.proxyBaseURL }
-        guard let session else { return CommandClient(api: api, proxyBaseURL: proxyBaseURL) }
-        return CommandClient(proxyBaseURL: proxyBaseURL, tokens: TokenProvider(api: api), usage: UsageReporter(api: api), session: session)
+        let usage = UsageReporter(api: api, store: usageStore)
+        guard let session else { return CommandClient(proxyBaseURL: proxyBaseURL, tokens: TokenProvider(api: api), usage: usage) }
+        return CommandClient(proxyBaseURL: proxyBaseURL, tokens: TokenProvider(api: api), usage: usage, session: session)
     }
 
     private static func checks(owner: WeakModel) -> OnboardingFlow.Checks {

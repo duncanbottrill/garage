@@ -135,6 +135,8 @@ notes) in the last column; the same lines go in the plan's execution record.
 | 8a | Wake, then the command goes | With the car asleep, tap a command and confirm Wake. The pill stays pending while the car comes online (up to 30 s) and the command then goes once, without a second tap or a "still waking" toast. | |
 | 8b | Wake from More | With the car asleep, More → Car shows "Wake the car". Wake asks first; Cancel sends nothing. Confirm: the detail reads "Waking…", then the row disappears as the car comes online and Status goes live. | |
 | 8c | Reconnect clears the refusal | After a "Tesla refused Garage's token · reconnect Tesla" Connection row, Reconnect Tesla and finish the sign-in. The row turns green at once, before any command. | |
+| 8d | Shared wake grace | With the car asleep, open Charge, change the limit and confirm the wake. Close the sheet and tap Lock within two minutes: it goes without a second prompt (and the same after Wake the car in More). | |
+| 8e | Usage survives a kill | Send a command, then swipe the app away within a second. Relaunch: `api_usage.commands` for the month has gone up by one (the batch on disk was sent with its old id), and `Application Support/garage/usage.json` is gone again. | |
 | 9 | Mac split layout and commands | On the Mac: the sidebar and the Status panel beside the map; lock/unlock and climate from the Mac. | |
 | 9a | Map pan and panel stops (iPhone) | Drag the map: it pans and stays put. Drag the panel down: it snaps to the compact stop (charge, range, pills; tiles gone, more map). Drag it up: the tiles return. Force-quit and relaunch: the panel opens at the stop you left it. | |
 | 10 | Bridge offline | Stop the bridge add-on for 2 min. Status shows "Telemetry paused since HH:mm" and the car becomes a solid dot (no halo). Start it again; both clear. | |
@@ -175,6 +177,9 @@ Minor items that earlier reviews deferred and Slice 1C leaves open, plus what re
   field trims spaces but not newlines.
 - **Vehicle check.** A car already in memory satisfies the onboarding vehicle check, so a car unlinked on another
   device is noticed only after a relaunch.
+- **Usage ledger.** Counts live on disk until `/api/usage` acknowledges them and are re-sent under the same
+  `report_id` (counted once for 30 days). Sign-out waits at most 3 s for them; a report later than the
+  30-day memory, or sent after the batch was dropped as a client error, is not recoverable.
 - **Decoding and storage.** Nested `jsonb` columns are decoded strictly (a malformed `doors` object fails the row
   rather than that field), and outside the sandbox (tests, `swift test`) the snapshot lives in the generic
   `Application Support/garage` folder.

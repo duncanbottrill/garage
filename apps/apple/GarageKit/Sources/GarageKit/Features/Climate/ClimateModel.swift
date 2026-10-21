@@ -68,6 +68,8 @@ public final class ClimateModel {
     ///   - wake: Wakes the car (``CommandClient/wake(vin:)``); only after the user confirms.
     ///   - awaitAwake: Waits for the row to say the car is online after a confirmed wake
     ///     (``CommandRunner/AwaitAwake``); the default does not wait.
+    ///   - lastWake: When the car was last woken through any surface (``CommandClient/lastWakeAt``),
+    ///     so a wake confirmed elsewhere is this sheet's grace too; the default knows of none.
     ///   - now: The clock (the runner's wake grace).
     ///   - locale: °C or °F for the inside temperature and target (``Units``).
     ///   - debounce: Quiet time before a target change is sent.
@@ -76,6 +78,7 @@ public final class ClimateModel {
         send: @escaping CommandRunner.Send,
         wake: @escaping CommandRunner.Wake,
         awaitAwake: @escaping CommandRunner.AwaitAwake = { true },
+        lastWake: @escaping @MainActor () -> Date? = { nil },
         now: @escaping @MainActor () -> Date = { .now },
         locale: Locale = .current,
         debounce: Duration = ClimateModel.defaultDebounce,
@@ -88,6 +91,7 @@ public final class ClimateModel {
         self.locale = locale
         self.debounce = debounce
         runner.isAsleep = { [weak self] in self?.state?.sleepState?.lowercased() == "asleep" }
+        runner.lastWakeElsewhere = lastWake
         temps.deliver = { [weak self] in await self?.deliverTarget($0) }
         for (seat, sender) in seatSenders {
             sender.deliver = { [weak self] in await self?.deliverSeat(seat, level: $0) }

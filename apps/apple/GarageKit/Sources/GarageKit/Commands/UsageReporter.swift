@@ -10,9 +10,16 @@ import Synchronization
 /// - A batch goes out ``defaultCoalesce`` (1 s) after the first count waiting, so a burst of taps is
 ///   one report, and never sooner than ``defaultInterval`` (5 s) after the previous batch. Each
 ///   batch is one request per category, with at most ``maxCount`` each; any rest waits for the next.
-/// - A 429 keeps the counts and sends them again after the window; it is not counted as a failed
+/// - A batch carries a ``Batch/id`` and is sent with that id until the backend answers, so a reply
+///   lost after the server counted it, or a relaunch with the batch still on disk, re-sends the same
+///   id and is counted once. A category's new counts wait while a batch of it is still unanswered,
+///   so there is at most one unanswered batch per category.
+/// - A 429 keeps the batch and sends it again after the window; it is not counted as a failed
 ///   attempt. Other transport and 5xx failures are tried again up to `attempts` times (waiting at
 ///   least `retryDelay`, doubled each time, and the window), then logged and dropped.
+/// - With a ``UsageStore`` the pending counts and the formed batches are saved on every change and
+///   picked up by the next reporter on the same store (the next launch), so a kill or a suspension
+///   loses nothing. ``discard()`` drops them (sign-out: they belong to the old account).
 /// - ``flush()`` (the app going to the background) sends what is waiting without the waits.
 ///
 /// A report that is dropped is never surfaced to the user, because the command it counts has
@@ -25,12 +32,32 @@ public final class UsageReporter: Sendable {
     /// The most one request counts (`/api/usage` caps `count` at 100).
     public static let maxCount = 100
 
+    /// One report to `/api/usage`: formed from the pending counts of one category, sent under its
+    /// `id` until the backend acknowledges it.
+    public struct Batch: Codable, Equatable, Sendable, Identifiable {
+        public let id: UUID
+        public let category: UsageCategory
+        public let count: Int
+
+        public init(id: UUID = UUID(), category: UsageCategory, count: Int) {
+            self.id = id
+            self.category = category
+            self.count = count
+        }
+    }
+
+    /// Delivers one batch (normally ``GarageAPI/reportUsage(_:count:reportID:)``).
+    public typealias Send = @Sendable (Batch) async throws -> Void
+
     private static let log = Logger(subsystem: "com.duncanbottrill.garage", category: "usage")
 
     private struct Ledger {
+        /// Counts not yet in a batch.
         var pending: [UsageCategory: Int] = [:]
-        /// Failed tries so far of each category's current batch (429s excluded).
-        var failures: [UsageCategory: Int] = [:]
+        /// Batches formed and not yet acknowledged (or dropped), in sending order.
+        var batches: [Batch] = []
+        /// Failed tries so far of each batch (429s excluded).
+        var failures: [UUID: Int] = [:]
         /// When the oldest pending count was recorded.
         var firstPending: ContinuousClock.Instant?
         /// When the last batch went out.
@@ -39,13 +66,17 @@ public final class UsageReporter: Sendable {
         var retryAfter: ContinuousClock.Instant?
         /// ``flush()`` asked for the next batch to skip the waits.
         var urgent = false
-        /// Sends batches while counts are pending; nil when idle.
+        /// Sends batches while anything is waiting; nil when idle.
         var worker: Task<Void, Never>?
-        /// The worker's current wait, cancelled by ``flush()``.
+        /// The worker's current wait, cancelled by ``flush()`` and ``discard()``.
         var sleeper: Task<Void, Never>?
+
+        var hasWork: Bool { !pending.isEmpty || !batches.isEmpty }
+        var saved: PendingUsage { PendingUsage(counts: pending, batches: batches) }
     }
 
-    private let send: @Sendable (UsageCategory, Int) async throws -> Void
+    private let send: Send
+    private let store: (any UsageStore)?
     private let attempts: Int
     private let retryDelay: Duration
     private let interval: Duration
@@ -57,24 +88,37 @@ public final class UsageReporter: Sendable {
     ///   - retryDelay: Least pause before the second try; doubled before each later one.
     ///   - interval: The least time between two batches (``defaultInterval``).
     ///   - coalesce: How long the first pending count waits for others (``defaultCoalesce``).
-    ///   - send: Delivers one report (normally ``GarageAPI/reportUsage(_:count:)``).
+    ///   - store: Where the unanswered counts are kept between launches; nil keeps them in memory
+    ///     only. What the store holds is sent first.
+    ///   - send: Delivers one batch (normally ``GarageAPI/reportUsage(_:count:reportID:)``).
     public init(
         attempts: Int = 3,
         retryDelay: Duration = .seconds(2),
         interval: Duration = UsageReporter.defaultInterval,
         coalesce: Duration = UsageReporter.defaultCoalesce,
-        send: @escaping @Sendable (UsageCategory, Int) async throws -> Void
+        store: (any UsageStore)? = nil,
+        send: @escaping Send
     ) {
         self.attempts = max(1, attempts)
         self.retryDelay = retryDelay
         self.interval = interval
         self.coalesce = coalesce
+        self.store = store
         self.send = send
+        guard let saved = store?.load(), !saved.isEmpty else { return }
+        ledger.withLock { ledger in
+            ledger.pending = saved.counts.filter { $0.value > 0 }
+            ledger.batches = saved.batches.filter { $0.count > 0 }
+            if !ledger.pending.isEmpty { ledger.firstPending = .now }
+            startWorker(&ledger)
+        }
     }
 
-    /// Reports through the Garage backend.
-    public convenience init(api: GarageAPI) {
-        self.init { category, count in try await api.reportUsage(category, count: count) }
+    /// Reports through the Garage backend, keeping the unanswered counts in `store`.
+    public convenience init(api: GarageAPI, store: (any UsageStore)? = FileUsageStore()) {
+        self.init(store: store) { batch in
+            try await api.reportUsage(batch.category, count: batch.count, reportID: batch.id)
+        }
     }
 
     /// Adds `count` units of `category` to the next batch; returns immediately.
@@ -83,7 +127,8 @@ public final class UsageReporter: Sendable {
         ledger.withLock { ledger in
             ledger.pending[category, default: 0] += count
             if ledger.firstPending == nil { ledger.firstPending = .now }
-            if ledger.worker == nil { ledger.worker = Task { [self] in await work() } }
+            persist(ledger)
+            startWorker(&ledger)
         }
     }
 
@@ -91,8 +136,26 @@ public final class UsageReporter: Sendable {
     /// background). Does nothing when nothing is waiting.
     public func flush() {
         let sleeper = ledger.withLock { ledger -> Task<Void, Never>? in
-            guard !ledger.pending.isEmpty else { return nil }
+            guard ledger.hasWork else { return nil }
             ledger.urgent = true
+            return ledger.sleeper
+        }
+        sleeper?.cancel()
+    }
+
+    /// Drops every unanswered count, here and in the store (sign-out: they belong to the account
+    /// that is leaving and would be counted against the next one). A request already in flight
+    /// finishes on its own.
+    public func discard() {
+        let sleeper = ledger.withLock { ledger -> Task<Void, Never>? in
+            ledger.pending = [:]
+            ledger.batches = []
+            ledger.failures = [:]
+            ledger.firstPending = nil
+            ledger.lastBatch = nil
+            ledger.retryAfter = nil
+            ledger.urgent = false
+            persist(ledger)
             return ledger.sleeper
         }
         sleeper?.cancel()
@@ -103,6 +166,25 @@ public final class UsageReporter: Sendable {
         while let worker = ledger.withLock({ $0.worker }) {
             await worker.value
         }
+    }
+
+    /// ``flush()`` then ``drain()``, giving up after `timeout` (the batches then stay in the store).
+    /// - Returns: Whether everything was delivered (or given up on) in time.
+    public func drain(timeout: Duration) async -> Bool {
+        flush()
+        let gate = ResumeGate<Bool>()
+        let draining = Task { [self] in
+            await drain()
+            gate.fire(true)
+        }
+        let timer = Task {
+            try? await Task.sleep(for: timeout)
+            gate.fire(false)
+        }
+        let delivered = await withCheckedContinuation { gate.arm($0) }
+        timer.cancel()
+        if !delivered { draining.cancel() }
+        return delivered
     }
 
     /// Transport failures, 5xx and 429 are worth another try; other 4xx answers are not.
@@ -117,89 +199,113 @@ public final class UsageReporter: Sendable {
 
     // MARK: Worker
 
+    /// Starts the worker if it is not running. Call under the lock.
+    private func startWorker(_ ledger: inout Ledger) {
+        guard ledger.worker == nil, ledger.hasWork else { return }
+        ledger.worker = Task { [self] in await work() }
+    }
+
+    /// Writes the ledger to the store. Call under the lock, so saves land in order.
+    private func persist(_ ledger: Ledger) {
+        store?.save(ledger.saved)
+    }
+
     private func work() async {
         while true {
             let due = ledger.withLock { ledger -> ContinuousClock.Instant? in
-                guard !ledger.pending.isEmpty else {
+                guard ledger.hasWork else {
                     ledger.worker = nil
                     ledger.urgent = false
                     return nil
                 }
                 if ledger.urgent { return .now }
-                var due = (ledger.firstPending ?? .now).advanced(by: coalesce)
+                var due: ContinuousClock.Instant = .now
+                if !ledger.pending.isEmpty { due = (ledger.firstPending ?? .now).advanced(by: coalesce) }
                 if let last = ledger.lastBatch { due = max(due, last.advanced(by: interval)) }
                 if let retryAfter = ledger.retryAfter { due = max(due, retryAfter) }
                 return due
             }
             guard let due else { return }
-            if due > .now { await wait(until: due) }
+            if due > .now {
+                // Woken early by flush() or discard(): go round again rather than forming batches
+                // now (a discard leaves nothing to send, and must not stamp a new window).
+                await wait(until: due)
+                continue
+            }
 
-            let batch = ledger.withLock { ledger -> [(UsageCategory, Int)] in
+            let batches = ledger.withLock { ledger -> [Batch] in
                 ledger.urgent = false
                 ledger.retryAfter = nil
                 ledger.lastBatch = .now
-                var batch: [(UsageCategory, Int)] = []
                 for category in UsageCategory.allCases {
                     guard let count = ledger.pending[category], count > 0 else { continue }
+                    // A batch of this category is still unanswered: the new counts wait for it, so it
+                    // keeps its id and the ledger never holds two unanswered batches of one category.
+                    guard !ledger.batches.contains(where: { $0.category == category }) else { continue }
                     let taken = min(count, Self.maxCount)
-                    batch.append((category, taken))
+                    ledger.batches.append(Batch(category: category, count: taken))
                     ledger.pending[category] = count > taken ? count - taken : nil
                 }
-                // A rest over the cap waits for the next window.
+                // A rest (over the cap, or behind an unanswered batch) waits for the next window.
                 ledger.firstPending = ledger.pending.isEmpty ? nil : .now
-                return batch
+                persist(ledger)
+                return ledger.batches
             }
-            for (category, count) in batch {
-                await deliver(category, count: count)
+            for batch in batches {
+                await deliver(batch)
             }
         }
     }
 
-    /// Sleeps until `due`, or until ``flush()`` cancels the wait.
+    /// Sleeps until `due`, or until ``flush()`` or ``discard()`` cancels the wait.
     private func wait(until due: ContinuousClock.Instant) async {
         let sleeper = Task<Void, Never> { _ = try? await Task.sleep(until: due, clock: .continuous) }
         let urgent = ledger.withLock { ledger -> Bool in
             ledger.sleeper = sleeper
-            return ledger.urgent
+            return ledger.urgent || !ledger.hasWork
         }
         if urgent { sleeper.cancel() }
         await sleeper.value
         ledger.withLock { $0.sleeper = nil }
     }
 
-    private func deliver(_ category: UsageCategory, count: Int) async {
+    private func deliver(_ batch: Batch) async {
+        let label = "\(batch.category.rawValue) x\(batch.count) (\(batch.id.uuidString.prefix(8)))"
         do {
-            try await send(category, count)
-            ledger.withLock { _ = $0.failures.removeValue(forKey: category) }
+            try await send(batch)
+            settle(batch)
         } catch APIError.rateLimited {
-            // Over `/api/usage`'s per-minute limit: keep the counts for after the window.
-            Self.log.info("usage report \(category.rawValue, privacy: .public) x\(count) rate limited; kept for the next window")
-            keep(category, count: count, retryAfter: nil)
+            // Over `/api/usage`'s per-minute limit: the batch keeps its id for after the window.
+            Self.log.info("usage report \(label, privacy: .public) rate limited; kept for the next window")
         } catch where !Self.isRetryable(error) {
             // A client error (bad request, no session): the same report would be refused again.
-            Self.log.error("usage report \(category.rawValue, privacy: .public) x\(count) dropped: \(error.localizedDescription, privacy: .public)")
-            ledger.withLock { _ = $0.failures.removeValue(forKey: category) }
+            Self.log.error("usage report \(label, privacy: .public) dropped: \(error.localizedDescription, privacy: .public)")
+            settle(batch)
         } catch {
             let attempt = ledger.withLock { ledger -> Int in
-                let attempt = (ledger.failures[category] ?? 0) + 1
-                ledger.failures[category] = attempt < attempts ? attempt : nil
+                // Discarded while in flight: nothing to retry.
+                guard ledger.batches.contains(where: { $0.id == batch.id }) else { return 0 }
+                let attempt = (ledger.failures[batch.id] ?? 0) + 1
+                if attempt < attempts {
+                    ledger.failures[batch.id] = attempt
+                    let backoff = retryDelay * (1 << min(attempt - 1, 16))
+                    let retryAfter = ContinuousClock.now.advanced(by: backoff)
+                    ledger.retryAfter = max(ledger.retryAfter ?? retryAfter, retryAfter)
+                }
                 return attempt
             }
-            guard attempt < attempts else {
-                Self.log.error("usage report \(category.rawValue, privacy: .public) x\(count) dropped after \(attempt) attempts: \(error.localizedDescription, privacy: .public)")
-                return
-            }
-            let backoff = retryDelay * (1 << min(attempt - 1, 16))
-            keep(category, count: count, retryAfter: ContinuousClock.now.advanced(by: backoff))
+            guard attempt >= attempts else { return }
+            Self.log.error("usage report \(label, privacy: .public) dropped after \(attempt) attempts: \(error.localizedDescription, privacy: .public)")
+            settle(batch)
         }
     }
 
-    /// Puts `count` back in front of the next batch.
-    private func keep(_ category: UsageCategory, count: Int, retryAfter: ContinuousClock.Instant?) {
+    /// Removes `batch` from the ledger: acknowledged, or given up on.
+    private func settle(_ batch: Batch) {
         ledger.withLock { ledger in
-            ledger.pending[category, default: 0] += count
-            if ledger.firstPending == nil { ledger.firstPending = .now }
-            if let retryAfter { ledger.retryAfter = max(ledger.retryAfter ?? retryAfter, retryAfter) }
+            ledger.batches.removeAll { $0.id == batch.id }
+            ledger.failures[batch.id] = nil
+            persist(ledger)
         }
     }
 }

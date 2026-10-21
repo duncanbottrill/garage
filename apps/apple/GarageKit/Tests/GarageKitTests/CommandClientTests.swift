@@ -24,8 +24,8 @@ private struct Rig {
             return .json(200, #"{"access_token":"tesla-\#(n)","expires_at":"2099-01-01T00:00:00Z"}"#)
         }
         backend.on("POST", "/api/usage") { _ in .json(200, #"{"ok":true}"#) }
-        usage = UsageReporter(attempts: usageAttempts, retryDelay: .milliseconds(10), interval: usageInterval, coalesce: usageCoalesce) { category, count in
-            try await api.reportUsage(category, count: count)
+        usage = UsageReporter(attempts: usageAttempts, retryDelay: .milliseconds(10), interval: usageInterval, coalesce: usageCoalesce) { batch in
+            try await api.reportUsage(batch.category, count: batch.count, reportID: batch.id)
         }
         let proxyURL = proxy.baseURL(port: 4443)
         client = CommandClient(
@@ -43,9 +43,16 @@ private struct Rig {
         proxy.on("POST", commandPath(name), sequence: replies)
     }
 
+    /// The usage reports' bodies without their `report_id` (each must carry one, as a lowercase UUID).
     func usageBodies() async -> [NSDictionary] {
         await usage.drain()
-        return backend.requests("POST", "/api/usage").compactMap(\.jsonBody)
+        return backend.requests("POST", "/api/usage").compactMap(\.jsonBody).map { body in
+            let rest = NSMutableDictionary(dictionary: body)
+            rest.removeObject(forKey: "report_id")
+            let id = body["report_id"] as? String
+            #expect(id.map { UUID(uuidString: $0) != nil && $0 == $0.lowercased() } == true, "report_id missing or malformed in \(body)")
+            return rest
+        }
     }
 }
 
@@ -277,7 +284,7 @@ private struct Rig {
 
         #expect(await rig.usageBodies() == [["category": "commands", "count": 1]])
         let usage = try #require(rig.backend.requests("POST", "/api/usage").first)
-        #expect(String(decoding: usage.body, as: UTF8.self) == #"{"category":"commands","count":1}"#)
+        #expect(Set((usage.jsonBody ?? [:]).allKeys.compactMap { $0 as? String }) == ["category", "count", "report_id"])
         #expect(usage.bearer == "Bearer sb-jwt")
     }
 
@@ -301,7 +308,27 @@ private struct Rig {
         try await rig.client.send(.doorLock, vin: Rig.vin)
 
         await rig.usage.drain()
-        #expect(rig.backend.requests("POST", "/api/usage").count == 2)
+        let reports = rig.backend.requests("POST", "/api/usage")
+        #expect(reports.count == 2)
+        #expect(reports[0].jsonBody?["report_id"] as? String == reports[1].jsonBody?["report_id"] as? String, "the retry carries the same id")
+    }
+
+    /// A wake that went through is remembered for every surface's grace; one dropped as already in
+    /// flight is not (the first sets it).
+    @Test func wakeSetsLastWakeAt() async throws {
+        let rig = Rig()
+        rig.proxy.on("POST", "/api/1/vehicles/VIN/wake_up") { _ in
+            .json(200, #"{"response":{"id":1,"vin":"VIN","state":"online"}}"#)
+        }
+        #expect(rig.client.lastWakeAt == nil)
+        let before = Date.now
+        try await rig.client.wake(vin: Rig.vin)
+        let at = try #require(rig.client.lastWakeAt)
+        #expect(at >= before && at <= .now)
+
+        rig.proxy.on("POST", "/api/1/vehicles/VIN/wake_up") { _ in .json(500, #"{"error":"boom"}"#) }
+        await #expect(throws: CommandError.self) { try await rig.client.wake(vin: Rig.vin) }
+        #expect(rig.client.lastWakeAt == at, "a failed wake does not move it")
     }
 
     @Test func wakeReportsWakesCategory() async throws {
