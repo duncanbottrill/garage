@@ -133,6 +133,7 @@ notes) in the last column; the same lines go in the plan's execution record.
 | 7 | Frunk | On Wi-Fi and cellular: Frunk → confirm. The lid pops. | |
 | 8 | No wake without the prompt | With the car asleep, tap a command. The wake prompt appears; Cancel sends nothing (the car stays asleep, no wake in the usage ledger). | |
 | 9 | Mac split layout and commands | On the Mac: the sidebar and the Status panel beside the map; lock/unlock and climate from the Mac. | |
+| 9a | Map pan and panel stops (iPhone) | Drag the map: it pans and stays put. Drag the panel down: it snaps to the compact stop (charge, range, pills; tiles gone, more map). Drag it up: the tiles return. Force-quit and relaunch: the panel opens at the stop you left it. | |
 | 10 | Bridge offline | Stop the bridge add-on for 2 min. Status shows "Telemetry paused since HH:mm" and the car becomes a solid dot (no halo). Start it again; both clear. | |
 | 11 | Tailscale off | Turn Tailscale off on the iPhone. Within 20 s (one probe) the "Connect Tailscale to control the car" banner shows and the quick actions are dimmed and do nothing. Turn it back on; they come back. | |
 | 12 | Rejected command | Make the car refuse one (for example start charging with no cable plugged in). The value reverts and the toast gives Tesla's reason. | |
