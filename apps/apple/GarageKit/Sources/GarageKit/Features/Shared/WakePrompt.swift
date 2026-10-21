@@ -9,6 +9,8 @@ struct WakePrompt: ViewModifier {
     static let title = "The car is asleep"
     /// The alert message.
     static let message = "Waking it costs a Tesla wake credit. Wake and send?"
+    /// The message for More's "Wake the car", where no command follows.
+    static let wakeOnlyMessage = "Waking it costs a Tesla wake credit and starts live updates. Wake it?"
     /// The confirming button.
     static let wakeButton = "Wake"
 

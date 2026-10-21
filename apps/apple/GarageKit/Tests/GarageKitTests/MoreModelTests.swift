@@ -350,4 +350,57 @@ extension MoreModelTests {
         failure = nil
         #expect(model.row(.connection)?.tone == .healthy)
     }
+
+    /// "Wake the car" shows only while the row says asleep. Wake calls the client once, then follows
+    /// the row online; a wake that goes through without the row flipping, and a failed wake, each say so.
+    @Test func wakeRowWhileAsleep() async throws {
+        let backend = FakeBackend()
+        var wakes = 0
+        var online = true
+        var failure: CommandError?
+        let model = MoreModel(
+            api: backend.api, probe: { _ in .reachable }, defaults: freshDefaults(), now: { Self.now },
+            wake: {
+                wakes += 1
+                if let failure { throw failure }
+                return true
+            },
+            awaitAwake: { online }
+        )
+        var state = try Fixture.state("vehicle_state_live")
+        model.state = state
+        #expect(!model.showsWake)
+        #expect(model.row(.wake) == nil)
+        await model.wakeNow()
+        #expect(wakes == 0, "nothing to wake while the row says online")
+
+        state.sleepState = "asleep"
+        model.state = state
+        #expect(model.row(.wake)?.detail == MoreModel.wakeIdleDetail)
+        #expect(model.row(.wake)?.tone == .neutral)
+
+        await model.wakeNow()
+        #expect(wakes == 1)
+        #expect(model.wakePhase == .awake)
+        #expect(model.row(.wake)?.detail == MoreModel.wakeAwakeDetail)
+
+        online = false
+        await model.wakeNow()
+        #expect(wakes == 2)
+        #expect(model.row(.wake)?.detail == MoreModel.wakeStillAsleepDetail)
+        #expect(model.row(.wake)?.tone == .warning)
+
+        failure = .unreachable
+        await model.wakeNow()
+        #expect(model.row(.wake)?.detail == CommandError.unreachable.errorDescription)
+        #expect(model.row(.wake)?.tone == .failed)
+
+        state.sleepState = "online"
+        model.state = state
+        #expect(model.row(.wake) == nil)
+
+        state.sleepState = "asleep"
+        model.state = state
+        #expect(model.row(.wake)?.detail == MoreModel.wakeIdleDetail, "a later sleep starts from the idle copy")
+    }
 }

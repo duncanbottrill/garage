@@ -82,7 +82,7 @@ public final class MoreModel {
     public struct Row: Sendable, Equatable, Identifiable {
         /// The rows, in the order they appear.
         public enum ID: Sendable, Hashable, CaseIterable {
-            case connection, bridge, budget, refresh, proxy, tailscale, account, about
+            case connection, bridge, budget, refresh, wake, proxy, tailscale, account, about
         }
 
         /// The trailing state: a coloured dot for the first three, a chevron or nothing for neutral.
@@ -182,9 +182,15 @@ public final class MoreModel {
 
     // MARK: Inputs
 
-    /// The car's latest row (bridge health, freshness for "Refresh now").
+    /// The car's latest row (bridge health, freshness for "Refresh now", asleep for "Wake the car").
     public var state: VehicleState? {
-        didSet { trackHeartbeat() }
+        didSet {
+            trackHeartbeat()
+            // The Wake row hides while the car is awake; each time it falls asleep again the row
+            // starts fresh (resetting on every awake row would race a wake still being followed).
+            let wasAsleep = oldValue?.sleepState?.lowercased() == "asleep"
+            if isAsleep, !wasAsleep { wakePhase = .idle }
+        }
     }
     /// The car (budget mode, published proxy URL, id for the refresh).
     public var vehicle: Vehicle?
@@ -203,6 +209,8 @@ public final class MoreModel {
     public private(set) var connectionError: String?
     /// The manual refresh.
     public private(set) var refreshPhase: RefreshPhase = .idle
+    /// Where a wake from More has got to (``wakeNow()``).
+    public private(set) var wakePhase: WakePhase = .idle
     /// The proxy probe started from "Test".
     public private(set) var proxyTest: ProxyTest = .idle
     /// The app's version, for About.
@@ -218,6 +226,8 @@ public final class MoreModel {
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let tokenFailure: @MainActor () -> CommandError?
     @ObservationIgnored private let teslaRejected: @MainActor () -> Bool
+    @ObservationIgnored private let wake: @MainActor () async throws -> Bool
+    @ObservationIgnored private let awaitAwake: @MainActor () async -> Bool
     @ObservationIgnored private let timeZone: TimeZone
     /// Bumped on every override change, so ``effectiveProxyURL`` (read from defaults) is observed.
     private var overrideRevision = 0
@@ -242,6 +252,10 @@ public final class MoreModel {
     ///     read whenever the rows are; it turns the Connection row red.
     ///   - teslaRejected: Whether Tesla refused the token after a refresh
     ///     (``CommandClient/teslaRejected``), read whenever the rows are; it offers "Reconnect Tesla".
+    ///   - wake: Sends `wake_up` (``CommandClient/wake(vin:)``); called only from ``wakeNow()``, after
+    ///     the view's confirmation.
+    ///   - awaitAwake: Waits for the row to say the car is online after that wake
+    ///     (``VehicleStore/waitUntilAwake(timeout:)``); the default does not wait.
     ///   - timeZone: For clock times ("rotated at 14:02").
     public init(
         api: API,
@@ -251,6 +265,8 @@ public final class MoreModel {
         appVersion: AppVersion = .main,
         tokenFailure: @escaping @MainActor () -> CommandError? = { nil },
         teslaRejected: @escaping @MainActor () -> Bool = { false },
+        wake: @escaping @MainActor () async throws -> Bool = { false },
+        awaitAwake: @escaping @MainActor () async -> Bool = { true },
         timeZone: TimeZone = .current
     ) {
         self.api = api
@@ -260,6 +276,8 @@ public final class MoreModel {
         self.appVersion = appVersion
         self.tokenFailure = tokenFailure
         self.teslaRejected = teslaRejected
+        self.wake = wake
+        self.awaitAwake = awaitAwake
         self.timeZone = timeZone
     }
 
@@ -325,6 +343,51 @@ public final class MoreModel {
             refreshPhase = .failed("Manual refresh is paused to stay in budget")
         } catch {
             refreshPhase = .failed(OnboardingFlow.message(for: error))
+        }
+    }
+
+    // MARK: Wake the car
+
+    /// Where a wake from More has got to; the row's detail follows it.
+    public enum WakePhase: Equatable, Sendable {
+        /// Nothing sent since the car fell asleep.
+        case idle
+        /// `wake_up` sent, or waiting for the row to say online.
+        case waking
+        /// The row says the car is online (the row hides on the next state).
+        case awake
+        /// `wake_up` went through but the row still said asleep after ``CommandRunner/onlineWait``.
+        case stillAsleep
+        /// The wake failed; the command's copy.
+        case failed(String)
+    }
+
+    /// The Wake row's detail before anything is sent.
+    public static let wakeIdleDetail = "Asleep · waking starts live updates and counts as a wake"
+    /// The Wake row's detail while waiting for the row to say online.
+    public static let wakeWakingDetail = "Waking…"
+    /// The Wake row's detail once the row says online.
+    public static let wakeAwakeDetail = "Awake"
+    /// The Wake row's detail when the car has not come online within the wait.
+    public static let wakeStillAsleepDetail = "Woken, but not online yet · give it a minute"
+
+    /// Whether the row says the car is asleep.
+    public var isAsleep: Bool { state?.sleepState?.lowercased() == "asleep" }
+    /// Whether to offer "Wake the car": only while the row says asleep.
+    public var showsWake: Bool { isAsleep }
+
+    /// One confirmed `wake_up` from More (the view asks first): wakes, then waits for the row to say
+    /// the car is online. The row hides once it does; otherwise its detail says what happened.
+    public func wakeNow() async {
+        guard showsWake, wakePhase != .waking else { return }
+        wakePhase = .waking
+        do {
+            _ = try await wake()
+            wakePhase = await awaitAwake() ? .awake : .stillAsleep
+        } catch let error as CommandError {
+            wakePhase = .failed(error.errorDescription ?? "The wake failed")
+        } catch {
+            wakePhase = .failed(error.localizedDescription)
         }
     }
 
@@ -398,6 +461,7 @@ public final class MoreModel {
     public var sections: [Section] {
         let at = now()
         var car = [bridgeRow(at), budgetRow]
+        if showsWake { car.append(wakeRow) }
         if showsRefreshNow { car.append(refreshRow(at)) }
         return [
             Section(title: "Tesla", rows: [connectionRow(at)]),
@@ -411,7 +475,7 @@ public final class MoreModel {
     /// Every row, in order.
     public var rows: [Row] { sections.flatMap(\.rows) }
 
-    /// The row with `id`, or nil when it is hidden (only "Refresh now" hides).
+    /// The row with `id`, or nil when it is hidden ("Refresh now" and "Wake the car" hide).
     public func row(_ id: Row.ID) -> Row? {
         rows.first { $0.id == id }
     }
@@ -477,6 +541,17 @@ public final class MoreModel {
         case .minimal: ("Minimal updates: budget nearly used", .failed)
         }
         return Row(id: .budget, icon: .gauge, title: "Budget", detail: detail, tone: tone)
+    }
+
+    private var wakeRow: Row {
+        let (detail, tone): (String, Row.Tone) = switch wakePhase {
+        case .idle: (Self.wakeIdleDetail, .neutral)
+        case .waking: (Self.wakeWakingDetail, .neutral)
+        case .awake: (Self.wakeAwakeDetail, .healthy)
+        case .stillAsleep: (Self.wakeStillAsleepDetail, .warning)
+        case let .failed(message): (message, .failed)
+        }
+        return Row(id: .wake, icon: .sun, title: "Wake the car", detail: detail, tone: tone)
     }
 
     private func refreshRow(_ at: Date) -> Row {

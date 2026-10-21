@@ -617,4 +617,28 @@ extension VehicleStoreTests {
         await empty.start()
         #expect(!empty.isStarted, "no car: nothing to follow")
     }
+
+    /// `waitUntilAwake` returns as soon as a row flips `sleep_state` off asleep, true at once when the
+    /// car is already awake, and false when nothing changes within the timeout.
+    @Test func waitUntilAwakeFollowsTheRow() async throws {
+        let store = VehicleStore(
+            feed: FakeFeed(events: []),
+            fetcher: FakeFetcher(vehicle: testVehicle, state: nil),
+            cache: InMemorySnapshotCache(),
+            vehicle: testVehicle
+        )
+        var asleep = try Fixture.state("vehicle_state_live")
+        asleep.sleepState = "asleep"
+        store.apply(state: asleep)
+        #expect(store.isAsleep)
+
+        #expect(await store.waitUntilAwake(timeout: .milliseconds(50)) == false)
+
+        let waiting = Task { await store.waitUntilAwake(timeout: .seconds(5)) }
+        try await Task.sleep(for: .milliseconds(30))
+        store.apply(row: ["sleep_state": .string("online")])
+        #expect(await waiting.value)
+        #expect(!store.isAsleep)
+        #expect(await store.waitUntilAwake(timeout: .zero))
+    }
 }

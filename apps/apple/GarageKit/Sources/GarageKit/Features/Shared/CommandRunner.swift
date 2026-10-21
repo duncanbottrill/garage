@@ -9,12 +9,16 @@ import Observation
 ///   ``CommandError/asleep``, ``run(_:)`` raises ``isAskingToWake`` and waits. Only ``confirmWake()``
 ///   (the prompt's Wake button) sends `wake_up`; ``cancelWake()`` gives up with ``Outcome/declined``.
 ///   Commands that need a wake while the prompt is up share it, and one wake.
-/// - After a confirmed wake the original command is sent once, without polling. If it is still
-///   asleep, the toast says ``stillWakingMessage``. For ``wakeGrace`` after a wake the row's stale
-///   `asleep` does not ask again (the bridge lags the car).
+/// - After a confirmed wake the runner waits for the row to say the car is online (`awaitAwake`,
+///   the vehicle store following Realtime for up to ``onlineWait``; no polling and nothing billed),
+///   then sends the original command once. If the row never flips, the command still goes once; an
+///   asleep answer then reads as ``stillWakingMessage``. For ``wakeGrace`` after a wake the row's
+///   stale `asleep` does not ask again (the bridge lags the car). A command arriving during that
+///   wait joins it rather than going out early.
 /// - **Cancel means no.** It declines every command waiting on the prompt and every command queued
 ///   behind one, and for ``declineWindow`` any further command that would need a wake is declined
-///   without asking (so a coalesced follow-up cannot raise the prompt again).
+///   without asking (so a coalesced follow-up cannot raise the prompt again). It also calls off a
+///   wait for the car to come online: the woken commands are declined, never sent late.
 /// - A command that needs a wake while no ``WakePrompt`` is on screen, or while another surface covers
 ///   it (``isCovered``: a control sheet over Status), is declined, never woken.
 /// - **One command per wire name at a time.** ``CommandClient`` drops a second send of a name that
@@ -27,6 +31,12 @@ public final class CommandRunner {
     public typealias Send = @MainActor (Command) async throws -> Bool
     /// Wakes the car (``CommandClient/wake(vin:)``).
     public typealias Wake = @MainActor () async throws -> Bool
+    /// Waits for the row to say the car is online after a wake (``VehicleStore/waitUntilAwake(timeout:)``
+    /// with ``onlineWait``); true once it is, false when it gave up waiting.
+    public typealias AwaitAwake = @MainActor () async -> Bool
+
+    /// How long a woken command waits for the row to say the car is online before it is sent anyway.
+    public static let onlineWait: Duration = .seconds(30)
 
     /// How a ``run(_:)`` ended.
     public enum Outcome: Sendable, Equatable {
@@ -87,12 +97,15 @@ public final class CommandRunner {
 
     @ObservationIgnored private let send: Send
     @ObservationIgnored private let wake: Wake
+    @ObservationIgnored private let awaitAwake: AwaitAwake
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private var activity: [String: Int] = [:]
     @ObservationIgnored private var busy: Set<String> = []
     @ObservationIgnored private var lanes: [String: [CheckedContinuation<Void, Never>]] = [:]
-    @ObservationIgnored private var promptWaiters: [CheckedContinuation<Task<CommandError?, Never>?, Never>] = []
-    @ObservationIgnored private var wakeTask: Task<CommandError?, Never>?
+    @ObservationIgnored private var promptWaiters: [CheckedContinuation<Task<WakeResult, Never>?, Never>] = []
+    @ObservationIgnored private var wakeTask: Task<WakeResult, Never>?
+    /// The wait for the row to say online after a wake, while it runs; cancelled by ``cancelWake()``.
+    @ObservationIgnored private var onlineWait: Task<Bool, Never>?
     @ObservationIgnored private var wokeAt: Date?
     @ObservationIgnored private var declinedAt: Date?
     /// Bumped by each Cancel; a command queued before it is declined when its turn comes.
@@ -101,10 +114,18 @@ public final class CommandRunner {
     /// - Parameters:
     ///   - send: Sends a command (`CommandClient.send(_:vin:)`).
     ///   - wake: Wakes the car (`CommandClient.wake(vin:)`); called only from ``confirmWake()``.
+    ///   - awaitAwake: Waits for the row to say the car is online after that wake; the default does
+    ///     not wait (fixed screens and tests without a store).
     ///   - now: The clock for ``wakeGrace``.
-    public init(send: @escaping Send, wake: @escaping Wake, now: @escaping @MainActor () -> Date = { .now }) {
+    public init(
+        send: @escaping Send,
+        wake: @escaping Wake,
+        awaitAwake: @escaping AwaitAwake = { true },
+        now: @escaping @MainActor () -> Date = { .now }
+    ) {
         self.send = send
         self.wake = wake
+        self.awaitAwake = awaitAwake
         self.now = now
     }
 
@@ -124,7 +145,9 @@ public final class CommandRunner {
         if declineEpoch != epoch { return .declined }
 
         var woke = false
-        if needsWakePrompt {
+        // A wake in progress (sent, or waiting for the car to come online) is joined, not skipped:
+        // the grace already hides the prompt, but the car is not up yet.
+        if needsWakePrompt || wakeTask != nil {
             switch await ensureAwake() {
             case .awake: woke = true
             case .declined: return .declined
@@ -156,28 +179,33 @@ public final class CommandRunner {
         }
     }
 
-    /// The prompt's Wake button: sends one `wake_up`, then lets every waiting command go.
+    /// The prompt's Wake button: sends one `wake_up`, waits for the row to say the car is online
+    /// (``onlineWait`` at most), then lets every waiting command go.
     public func confirmWake() {
         guard isAskingToWake else { return }
         isAskingToWake = false
-        let task = Task { () -> CommandError? in
-            let failure: CommandError?
+        let task = Task { () -> WakeResult in
             do {
                 // `false` means a wake is already in flight elsewhere: the car is on its way up.
                 _ = try await wake()
-                failure = nil
             } catch let error as CommandError {
-                failure = error
-            } catch {
-                failure = .rejected(reason: error.localizedDescription)
-            }
-            if let error = failure {
                 show(error.errorDescription ?? "")
-            } else {
-                wokeAt = now()
+                wakeTask = nil
+                return .failed
+            } catch {
+                show(error.localizedDescription)
+                wakeTask = nil
+                return .failed
             }
+            wokeAt = now()
+            // The wait is its own task so Cancel, a covering sheet or the host going away can call
+            // it off. Awake or timed out, the commands then go once; called off, they are declined.
+            let wait = Task { await awaitAwake() }
+            onlineWait = wait
+            _ = await wait.value
+            onlineWait = nil
             wakeTask = nil
-            return failure
+            return wait.isCancelled ? .declined : .awake
         }
         wakeTask = task
         let waiting = promptWaiters
@@ -188,10 +216,11 @@ public final class CommandRunner {
     /// The prompt's Cancel button (or the prompt going away): every waiting command is declined,
     /// every command queued behind one too, and for ``declineWindow`` nothing asks again.
     public func cancelWake() {
-        guard isAskingToWake || !promptWaiters.isEmpty else { return }
+        guard isAskingToWake || !promptWaiters.isEmpty || onlineWait != nil else { return }
         isAskingToWake = false
         declinedAt = now()
         declineEpoch += 1
+        onlineWait?.cancel()
         let waiting = promptWaiters
         promptWaiters = []
         waiting.forEach { $0.resume(returning: nil) }
@@ -222,7 +251,7 @@ public final class CommandRunner {
     }
 
     private func ensureAwake() async -> WakeResult {
-        let task: Task<CommandError?, Never>?
+        let task: Task<WakeResult, Never>?
         if let wakeTask {
             task = wakeTask
         } else {
@@ -233,7 +262,7 @@ public final class CommandRunner {
             }
         }
         guard let task else { return .declined }
-        return await task.value == nil ? .awake : .failed
+        return await task.value
     }
 
     private func show(_ message: String) {

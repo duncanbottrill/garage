@@ -21,7 +21,8 @@ import Synchronization
 /// - A failed token fetch is published as ``tokenFailure`` (More's Connection row turns red) until a
 ///   later token fetch succeeds, whatever the proxy then answers. It is never a reason to sign out.
 /// - The proxy's second 401 (Tesla refused a freshly fetched token) is published as ``teslaRejected``
-///   until a later send goes through, so More offers "Reconnect Tesla" as the error copy says.
+///   until a later send goes through or the owner reconnects Tesla (``connectionRestored()``), so
+///   More offers "Reconnect Tesla" as the error copy says.
 /// - The caller cancelling a send gets `CancellationError`; once a send has timed out or been
 ///   cancelled, nothing more is posted for it, even if its token arrives later.
 @MainActor
@@ -39,8 +40,14 @@ public final class CommandClient {
 
     /// True after the proxy refused the Tesla token a second time (after one refresh): the token was
     /// fetched fine, but Tesla no longer accepts it, so the owner has to reconnect Tesla. Cleared by
-    /// the next send that goes through.
+    /// the next send that goes through, or by ``connectionRestored()``.
     public private(set) var teslaRejected = false
+
+    /// Clears ``teslaRejected``: the owner has just reconnected Tesla (the `garage://connected`
+    /// callback came back clean), so the refusal is history before the next command proves it.
+    public func connectionRestored() {
+        teslaRejected = false
+    }
 
     /// The proxy's reachability, as last published by ``reachabilityMonitor``.
     public var reachability: ProxyReachability.State { reachabilityMonitor.state }

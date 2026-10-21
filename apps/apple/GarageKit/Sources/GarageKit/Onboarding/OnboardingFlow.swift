@@ -157,8 +157,7 @@ public final class OnboardingFlow {
     @discardableResult
     public func handle(url: URL) async -> Bool {
         guard Self.isConnectedCallback(url) else { return false }
-        let failure = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .queryItems?.first { $0.name == "error" }?.value
+        let failure = Self.callbackError(in: url)
         // A clean return from the Tesla sign-in completes a requested reconnect; one with an error
         // keeps the owner on Connect.
         if failure == nil { reconnectRequested = false }
@@ -167,6 +166,11 @@ public final class OnboardingFlow {
             lastError = Self.callbackMessage(for: failure)
         }
         return true
+    }
+
+    /// The `error` query item of a `garage://connected` callback, or nil for a clean return.
+    public static func callbackError(in url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "error" }?.value
     }
 
     /// Back to `step` with nothing remembered: ``Step/signIn`` on sign-out (the default), or
