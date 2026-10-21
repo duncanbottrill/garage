@@ -33,12 +33,19 @@
 # SHA-256 fingerprint changes the proxy is restarted to load it. In
 # hostname mode the FQDN may appear after this service starts (it does not
 # wait for tailscale), so the proxy step re-checks every 30s until
-# /data/tailscale/fqdn exists and retries a failed `tailscale cert` after 10
-# minutes, independently of the private-CA schedule. The fallback mode makes
-# the same call for the proxy rather than copying /data/tls: tailscaled
-# serves the second request from its own certificate cache, and one code
-# path covers both modes. With tailscale disabled the proxy keeps the
-# self-signed pair proxy/run generates.
+# /data/tailscale/fqdn exists and retries a failed `tailscale cert` with a
+# backoff (30s, doubling to 10 minutes; reset after a success), independently
+# of the private-CA schedule. The fallback mode makes the same call for the
+# proxy rather than copying /data/tls: tailscaled serves the second request
+# from its own certificate cache, and one code path covers both modes. With
+# tailscale disabled the proxy keeps the self-signed pair proxy/run
+# generates.
+#
+# Every `tailscale cert` call is bounded (CERT_TIMEOUT, then killed): a
+# stalled tailscaled or an unreachable ACME endpoint must not hang this loop
+# and with it every later renewal; a timed-out call counts as a failure and
+# is retried on the same backoff. The fallback mode's own retry after a
+# failed telemetry or proxy certificate uses the same backoff.
 #
 # The option is normalised exactly as the ingest's options.ts does it:
 # leading/trailing whitespace trimmed, lower-cased, and anything left that
@@ -53,6 +60,30 @@ TS=(tailscale --socket=/run/tailscale/tailscaled.sock)
 FQDN_FILE=/data/tailscale/fqdn
 PROXY_TLS_DIR=/data/proxy-tls
 PROXY_SERVICE=/run/service/proxy
+# Seconds a single `tailscale cert` may take before it is killed.
+CERT_TIMEOUT=120
+# Retry backoff after a failed `tailscale cert`: first wait, and the cap.
+RETRY_MIN=30
+RETRY_MAX=600
+
+# `tailscale cert "$@"`, bounded to CERT_TIMEOUT seconds (SIGTERM, then
+# SIGKILL 10 s later). Returns 124 (or 137 when the kill was needed) on a
+# timeout, tailscale's status otherwise.
+ts_cert() {
+  local rc=0
+  timeout --kill-after=10 "${CERT_TIMEOUT}" "${TS[@]}" cert "$@" || rc=$?
+  if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+    bashio::log.error "tlscert: tailscale cert timed out after ${CERT_TIMEOUT}s"
+  fi
+  return "${rc}"
+}
+
+# Prints the wait after the next failure given the current one: doubled, capped.
+next_retry() {
+  local n=$(( $1 * 2 ))
+  if [ "${n}" -gt "${RETRY_MAX}" ]; then n="${RETRY_MAX}"; fi
+  echo "${n}"
+}
 
 # SHA-256 fingerprint of the first certificate in $1, or "" if unreadable.
 leaf_fingerprint() {
@@ -68,7 +99,7 @@ refresh_proxy_cert() {
   local fqdn="$1" old_fp new_fp
   mkdir -p "${PROXY_TLS_DIR}"
   old_fp="$(leaf_fingerprint "${PROXY_TLS_DIR}/cert.pem")"
-  if ! "${TS[@]}" cert --cert-file "${PROXY_TLS_DIR}/cert.pem.tmp" --key-file "${PROXY_TLS_DIR}/key.pem.tmp" "${fqdn}"; then
+  if ! ts_cert --cert-file "${PROXY_TLS_DIR}/cert.pem.tmp" --key-file "${PROXY_TLS_DIR}/key.pem.tmp" "${fqdn}"; then
     rm -f "${PROXY_TLS_DIR}/cert.pem.tmp" "${PROXY_TLS_DIR}/key.pem.tmp"
     return 1
   fi
@@ -127,10 +158,12 @@ if [ -n "${TELEMETRY_HOSTNAME}" ]; then
 
   # Next run (epoch seconds) of each step: the private-CA leaf every 24h
   # (10 minutes after a failure); the proxy certificate after it and then
-  # every 24h, every 30s while the FQDN is missing, 10 minutes after a
-  # failed `tailscale cert`.
+  # every 24h, every 30s while the FQDN is missing, and after a failed
+  # `tailscale cert` on the backoff (PROXY_RETRY, doubling to RETRY_MAX;
+  # reset once a fetch succeeds).
   CA_DUE=0
   PROXY_DUE=0
+  PROXY_RETRY="${RETRY_MIN}"
   WAITING_FQDN=false
   while true; do
     NOW="$(date +%s)"
@@ -169,10 +202,14 @@ if [ -n "${TELEMETRY_HOSTNAME}" ]; then
         WAITING_FQDN=false
         FQDN="$(cat "${FQDN_FILE}")"
         if refresh_proxy_cert "${FQDN}"; then
-          PROXY_DUE=$((NOW + 86400))
+          PROXY_DUE=$(($(date +%s) + 86400))
+          PROXY_RETRY="${RETRY_MIN}"
         else
-          bashio::log.error "tlscert: tailscale cert for the proxy (${FQDN}) failed; retrying in 10 minutes"
-          PROXY_DUE=$((NOW + 600))
+          # Re-read the clock: the fetch may have run up to its timeout, and
+          # the backoff must count from now, not from before the call.
+          bashio::log.error "tlscert: tailscale cert for the proxy (${FQDN}) failed; retrying in ${PROXY_RETRY}s"
+          PROXY_DUE=$(($(date +%s) + PROXY_RETRY))
+          PROXY_RETRY="$(next_retry "${PROXY_RETRY}")"
         fi
       else
         if [ "${WAITING_FQDN}" = false ]; then
@@ -218,11 +255,20 @@ while [ ! -s "${FQDN_FILE}" ]; do
   waited=$((waited + 2))
 done
 
+# Wait after a failed fetch: RETRY_MIN, doubling to RETRY_MAX, reset by a success.
+RETRY="${RETRY_MIN}"
 while true; do
+  # The tailscale service removes the file while it restarts; wait for the
+  # fresh one rather than exiting (set -e) on a failed cat.
+  if [ ! -s "${FQDN_FILE}" ]; then
+    bashio::log.info "tlscert: ${FQDN_FILE} missing (tailscale restarting); waiting"
+    sleep 30
+    continue
+  fi
   FQDN="$(cat "${FQDN_FILE}")"
 
   OLD_FP="$(leaf_fingerprint "${TLS_DIR}/server.crt")"
-  if "${TS[@]}" cert --cert-file "${TLS_DIR}/server.crt.tmp" --key-file "${TLS_DIR}/server.key.tmp" "${FQDN}"; then
+  if ts_cert --cert-file "${TLS_DIR}/server.crt.tmp" --key-file "${TLS_DIR}/server.key.tmp" "${FQDN}"; then
     chmod 600 "${TLS_DIR}/server.key.tmp"
 
     # Chain without the leaf: everything after the first certificate block.
@@ -262,16 +308,19 @@ while true; do
     fi
 
     if ! refresh_proxy_cert "${FQDN}"; then
-      bashio::log.error "tlscert: tailscale cert for the proxy (${FQDN}) failed; retrying in 10 minutes"
-      sleep 600
+      bashio::log.error "tlscert: tailscale cert for the proxy (${FQDN}) failed; retrying in ${RETRY}s"
+      sleep "${RETRY}"
+      RETRY="$(next_retry "${RETRY}")"
       continue
     fi
   else
     rm -f "${TLS_DIR}/server.crt.tmp" "${TLS_DIR}/server.key.tmp"
-    bashio::log.error "tlscert: tailscale cert failed; retrying in 10 minutes"
-    sleep 600
+    bashio::log.error "tlscert: tailscale cert failed; retrying in ${RETRY}s"
+    sleep "${RETRY}"
+    RETRY="$(next_retry "${RETRY}")"
     continue
   fi
 
+  RETRY="${RETRY_MIN}"
   sleep 86400
 done

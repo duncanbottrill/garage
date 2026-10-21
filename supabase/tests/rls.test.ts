@@ -75,6 +75,22 @@ describe("row level security", () => {
     const { data: s } = await admin.from("vehicle_state").select("soc").eq("vehicle_id", v!.id).single();
     expect(Number(s?.soc)).toBe(51);
   });
+  it("merge_vehicle_state p_clear nulls known columns, ignores unknown and protected keys, and a patched key keeps its value", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    await admin.from("vehicle_state").upsert({ vehicle_id: v!.id, owner_id: a.id, soc: 51, scheduled_charge_at: "2026-10-22T01:00:00Z", charge_amps: 16 });
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { charge_amps: 32 }, p_clear: ["scheduled_charge_at", "charge_amps", "owner_id", "updated_at", "nonsense"] });
+    expect(error).toBeNull();
+    const { data: s } = await admin.from("vehicle_state").select("soc, scheduled_charge_at, charge_amps, owner_id, updated_at").eq("vehicle_id", v!.id).single();
+    expect(Number(s?.soc)).toBe(51); expect(s?.scheduled_charge_at).toBeNull(); expect(Number(s?.charge_amps)).toBe(32); expect(s?.owner_id).toBe(a.id); expect(s?.updated_at).not.toBeNull();
+  });
+  it("merge_vehicle_state still accepts the two-argument call (p_clear defaults to empty)", async () => {
+    const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
+    await admin.from("vehicle_state").upsert({ vehicle_id: v!.id, owner_id: a.id, scheduled_charge_at: "2026-10-22T01:00:00Z" });
+    const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: { soc: 52 } });
+    expect(error).toBeNull();
+    const { data: s } = await admin.from("vehicle_state").select("soc, scheduled_charge_at").eq("vehicle_id", v!.id).single();
+    expect(Number(s?.soc)).toBe(52); expect(s?.scheduled_charge_at).not.toBeNull();
+  });
   it("merge_vehicle_state rejects a non-object patch", async () => {
     const { data: v } = await admin.from("vehicles").select("id").eq("vin", "VINAAAA").single();
     const { error } = await admin.rpc("merge_vehicle_state", { p_vehicle: v!.id, p_patch: ["soc"] });

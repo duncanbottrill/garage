@@ -59,7 +59,7 @@ Owner steps to take the Garage Bridge add-on from zero to streaming on the Green
 | `telemetry_last_error` contains `hostname domain does not match with partner account` | `telemetry_hostname` is empty (Funnel fallback) or not under `duncanbottrill.com` | Set it as in step 5 |
 | The configuration syncs but the car never connects | DNS record or port-forward wrong, or the home is behind CGNAT | Run the `openssl s_client` check from step 6 from outside the home network; behind CGNAT use the IPv6 route or a relay (step 5) |
 | `could not publish the proxy port 4443 on the tailnet` | `tailscale serve` failed in hostname mode | Read the serve output just above it in the log; check the node is up and the tailnet policy |
-| `tlscert: tailscale cert failed; retrying in 10 minutes` | HTTPS certificates are disabled for the tailnet, or Let's Encrypt is rate-limiting this name | Enable HTTPS certificates on the tailnet's DNS page and wait for the retry |
+| `tlscert: tailscale cert failed; retrying in 30s` (doubling to 600s) | HTTPS certificates are disabled for the tailnet, or Let's Encrypt is rate-limiting this name; a `timed out after 120s` line just before means tailscaled or ACME did not answer | Enable HTTPS certificates on the tailnet's DNS page and wait for the retry |
 
 ### Releasing a new version
 

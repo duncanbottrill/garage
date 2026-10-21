@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import type { BudgetMode } from "@garage/core";
 import { loadOptions, type LogLevel } from "./options";
 import { startMqttSource, type MqttSource } from "./mqtt-source";
-import { toSignalRow, toStatePatch, type BridgeEvent, type SignalRow } from "./state";
+import { toSignalRow, toStateClears, toStatePatch, type BridgeEvent, type SignalRow } from "./state";
 import { Batcher } from "./batcher";
 import { Health } from "./health";
 import { SupabaseSink, type Sink } from "./supabase-sink";
@@ -254,7 +254,7 @@ export interface ProxyUrlPublisherDeps {
   tailscaleEnabled: boolean;
   /** Throws while `/data/tailscale/fqdn` is not written yet (or is malformed). */
   readFqdn: () => string;
-  sink: Pick<Sink, "setProxyBaseUrl">;
+  sink: Pick<Sink, "setProxyBaseUrl" | "getProxyBaseUrl">;
   log: Logger;
 }
 
@@ -267,14 +267,19 @@ export interface ProxyUrlPublisher {
  * Keeps `vehicles.proxy_base_url` in step with the tailnet FQDN, so the app
  * finds the command proxy (`https://<fqdn>:4443`) without configuration.
  * Runs on every heartbeat but only writes when the value differs from the
- * last one written successfully: once at start, and again if the node's
- * FQDN changes. With tailscale disabled it writes `null` once. While the
- * FQDN file is missing nothing is written (a stale URL is left alone); a
- * failed write is logged and retried on the next heartbeat.
+ * one the row holds: before the first write it reads the current column, so
+ * a restart with an unchanged FQDN writes nothing (and does not bump the
+ * row); after that the last value written successfully is authoritative,
+ * so a write happens again only if the node's FQDN changes. With tailscale
+ * disabled it makes sure the column is `null`. While the FQDN file is
+ * missing nothing is written (a stale URL is left alone); a failed read is
+ * logged and treated as "unknown" (so the write goes ahead), a failed write
+ * is logged and retried on the next heartbeat.
  */
 export function createProxyUrlPublisher(deps: ProxyUrlPublisherDeps): ProxyUrlPublisher {
   const { log } = deps;
-  // `undefined` = nothing written yet (distinct from a published `null`).
+  // `undefined` = not known yet (distinct from a known `null`): read from
+  // the row once, then whatever was last written.
   let published: string | null | undefined;
   let inFlight = false;
 
@@ -295,6 +300,17 @@ export function createProxyUrlPublisher(deps: ProxyUrlPublisherDeps): ProxyUrlPu
       if (url === undefined || url === published) return;
       inFlight = true;
       try {
+        if (published === undefined) {
+          try {
+            published = await deps.sink.getProxyBaseUrl();
+          } catch (err) {
+            log("warning", "proxy_base_url read failed", { error: errMsg(err) });
+          }
+          if (url === published) {
+            log("debug", "proxy_base_url unchanged", { proxy_base_url: url });
+            return;
+          }
+        }
         await deps.sink.setProxyBaseUrl(url);
         published = url;
         log("info", "proxy_base_url published", { proxy_base_url: url });
@@ -308,8 +324,13 @@ export function createProxyUrlPublisher(deps: ProxyUrlPublisherDeps): ProxyUrlPu
 }
 
 export interface PatchAccumulator {
-  /** Merges an incoming state patch into whatever's pending (deep-merging the known nested columns). */
-  merge(patch: Record<string, unknown>): void;
+  /**
+   * Merges an incoming state patch into whatever's pending (deep-merging the
+   * known nested columns); `clear` names top-level keys to set to NULL. Order
+   * wins per key: a value after a clear replaces the clear, a clear after a
+   * value drops the value.
+   */
+  merge(patch: Record<string, unknown>, clear?: string[]): void;
   /**
    * Flushes whatever's pending via `sink.mergeState`, or no-ops if nothing
    * is pending. Never throws. A failed patch is re-queued under newer data
@@ -317,6 +338,32 @@ export interface PatchAccumulator {
    */
   flush(): Promise<void>;
 }
+
+/** A pending state change: values to set and top-level keys to NULL, never overlapping. */
+interface PendingChange {
+  patch: Record<string, unknown>;
+  clear: Set<string>;
+}
+
+/**
+ * Applies `newer` on top of `older`: patch keys deep-merge as `mergePatch`
+ * does, a newer value cancels an older clear of the same key, a newer clear
+ * drops an older value of it. Used both for incoming events and for
+ * re-queuing a failed flush underneath what arrived since.
+ */
+function combineChanges(older: PendingChange, newer: PendingChange): PendingChange {
+  const patch = mergePatch(older.patch, newer.patch);
+  const clear = new Set(older.clear);
+  for (const key of Object.keys(newer.patch)) clear.delete(key);
+  for (const key of newer.clear) {
+    delete patch[key];
+    clear.add(key);
+  }
+  return { patch, clear };
+}
+
+const emptyChange = (): PendingChange => ({ patch: {}, clear: new Set() });
+const isEmptyChange = (c: PendingChange): boolean => Object.keys(c.patch).length === 0 && c.clear.size === 0;
 
 /**
  * Accumulates `vehicle_state` patches between flush ticks and merges them
@@ -326,7 +373,7 @@ export interface PatchAccumulator {
  * `main()` itself.
  */
 export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: Health, log: Logger): PatchAccumulator {
-  let pendingPatch: Record<string, unknown> = {};
+  let pending: PendingChange = emptyChange();
   // Consecutive mergeState failures of the (re-queued) pending patch.
   let consecutiveFailures = 0;
   // Tracks a `sink.mergeState` call already in flight, the same way
@@ -337,13 +384,15 @@ export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: H
   let flushingPromise: Promise<void> | null = null;
 
   async function doFlush(): Promise<void> {
-    if (Object.keys(pendingPatch).length === 0) return;
-    const patch = pendingPatch;
-    pendingPatch = {};
+    if (isEmptyChange(pending)) return;
+    const change = pending;
+    pending = emptyChange();
 
     const task = (async () => {
       try {
-        await sink.mergeState(patch);
+        // Same call shape as before when nothing is cleared.
+        if (change.clear.size > 0) await sink.mergeState(change.patch, [...change.clear]);
+        else await sink.mergeState(change.patch);
         consecutiveFailures = 0;
       } catch (err) {
         health.patchFailed(err);
@@ -359,7 +408,7 @@ export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: H
         // Re-queue UNDERNEATH whatever arrived since (including while this
         // call was in flight): newer values win, but a one-off Supabase blip
         // no longer loses e.g. a lock change that only resends hourly.
-        pendingPatch = mergePatch(patch, pendingPatch);
+        pending = combineChanges(change, pending);
         log("warning", "mergeState failed, re-queuing patch", { error: errMsg(err), attempt: consecutiveFailures });
       }
     })();
@@ -375,8 +424,8 @@ export function createPatchAccumulator(sink: Pick<Sink, "mergeState">, health: H
   }
 
   return {
-    merge(patch: Record<string, unknown>): void {
-      pendingPatch = mergePatch(pendingPatch, patch);
+    merge(patch: Record<string, unknown>, clear: string[] = []): void {
+      pending = combineChanges(pending, { patch, clear: new Set(clear) });
     },
     async flush(): Promise<void> {
       if (flushingPromise) {
@@ -493,7 +542,7 @@ async function main(): Promise<void> {
     if (ev.kind === "field" && vehicle) {
       activeRowBatcher.push(toSignalRow(ev, vehicle.vehicleId, vehicle.ownerId));
     }
-    activePatchAccumulator.merge(toStatePatch(ev) as Record<string, unknown>);
+    activePatchAccumulator.merge(toStatePatch(ev) as Record<string, unknown>, toStateClears(ev));
   }
 
   mqttSource = startMqttSource({
