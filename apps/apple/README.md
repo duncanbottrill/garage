@@ -178,8 +178,8 @@ Minor items that earlier reviews deferred and Slice 1C leaves open, plus what re
 - **Vehicle check.** A car already in memory satisfies the onboarding vehicle check, so a car unlinked on another
   device is noticed only after a relaunch.
 - **Usage ledger.** Counts live on disk until `/api/usage` acknowledges them and are re-sent under the same
-  `report_id` (counted once for 30 days). Sign-out waits at most 3 s for them; a report later than the
-  30-day memory, or sent after the batch was dropped as a client error, is not recoverable.
+  `report_id` (counted once for 30 days; offline retries back off to 10 min). Sign-out waits at most 3 s for
+  them; a batch that reaches 25 days unsent, or one refused with a 4xx or three 5xx answers, is dropped.
 - **Decoding and storage.** Nested `jsonb` columns are decoded strictly (a malformed `doors` object fails the row
   rather than that field), and outside the sandbox (tests, `swift test`) the snapshot lives in the generic
   `Application Support/garage` folder.

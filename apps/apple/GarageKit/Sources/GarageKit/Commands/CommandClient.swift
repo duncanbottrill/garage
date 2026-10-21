@@ -42,10 +42,16 @@ public final class CommandClient {
     /// fetched fine, but Tesla no longer accepts it, so the owner has to reconnect Tesla. Cleared by
     /// the next send that goes through, or by ``connectionRestored()``.
     public private(set) var teslaRejected = false
-    /// When the last wake this client sent went through (``wake(vin:)``). Every surface's
-    /// ``CommandRunner`` reads it, so a wake confirmed in a sheet, or from More, is the grace for
-    /// all of them; nil until the first wake of this session.
-    public private(set) var lastWakeAt: Date?
+    /// The last wake this client sent that went through (``wake(vin:)``), and which car. Every
+    /// surface's ``CommandRunner`` reads it through ``lastWakeAt(vin:)``, so a wake confirmed in a
+    /// sheet, or from More, is the grace for all of them; nil until the first wake of this session.
+    public private(set) var lastWake: (vin: String, at: Date)?
+
+    /// When this car was last woken through this client, if it was.
+    public func lastWakeAt(vin: String?) -> Date? {
+        guard let lastWake, lastWake.vin == vin else { return nil }
+        return lastWake.at
+    }
 
     /// Clears ``teslaRejected``: the owner has just reconnected Tesla (the `garage://connected`
     /// callback came back clean), so the refusal is history before the next command proves it.
@@ -89,7 +95,7 @@ public final class CommandClient {
     }
 
     /// A client wired to the Garage backend: tokens and usage through `api`.
-    public convenience init(api: GarageAPI, proxyBaseURL: @escaping @MainActor () -> URL?, usageStore: (any UsageStore)? = FileUsageStore()) {
+    public convenience init(api: GarageAPI, proxyBaseURL: @escaping @MainActor () -> URL?, usageStore: (any UsageStore)? = nil) {
         self.init(proxyBaseURL: proxyBaseURL, tokens: TokenProvider(api: api), usage: UsageReporter(api: api, store: usageStore))
     }
 
@@ -109,7 +115,9 @@ public final class CommandClient {
     /// - Throws: ``CommandError``, or `CancellationError` when the calling task is cancelled.
     @discardableResult
     public func wake(vin: String) async throws -> Bool {
-        try await run(key: "wake_up", path: "api/1/vehicles/\(vin)/wake_up", body: [:], kind: .wake)
+        let sent = try await run(key: "wake_up", path: "api/1/vehicles/\(vin)/wake_up", body: [:], kind: .wake)
+        if sent { lastWake = (vin, .now) }
+        return sent
     }
 
     // MARK: Exchange
@@ -144,7 +152,6 @@ public final class CommandClient {
             throw CommandError.rejected(reason: "Unexpected error: \(error.localizedDescription)")
         }
         teslaRejected = false
-        if kind == .wake { lastWakeAt = .now }
         usage.record(kind == .wake ? .wakes : .commands)
         return true
     }
@@ -163,10 +170,10 @@ public final class CommandClient {
         await usage.drain(timeout: timeout)
     }
 
-    /// Drops every usage count not yet acknowledged, in memory and on disk (sign-out: they belong to
-    /// the account that is leaving).
-    public func discardUsage() {
-        usage.discard()
+    /// Drops every usage count not yet acknowledged, in memory and on disk, and stops counting for
+    /// good (sign-out: they belong to the account that is leaving, and the store to the next client).
+    public func retireUsage() {
+        usage.retire()
     }
 
     private static func encode(_ body: [String: AnyCodable]) throws -> Data {

@@ -320,15 +320,17 @@ private struct Rig {
         rig.proxy.on("POST", "/api/1/vehicles/VIN/wake_up") { _ in
             .json(200, #"{"response":{"id":1,"vin":"VIN","state":"online"}}"#)
         }
-        #expect(rig.client.lastWakeAt == nil)
+        #expect(rig.client.lastWakeAt(vin: Rig.vin) == nil)
         let before = Date.now
         try await rig.client.wake(vin: Rig.vin)
-        let at = try #require(rig.client.lastWakeAt)
+        let at = try #require(rig.client.lastWakeAt(vin: Rig.vin))
         #expect(at >= before && at <= .now)
+        #expect(rig.client.lastWakeAt(vin: "OTHER") == nil, "the grace is the woken car's, not another's")
+        #expect(rig.client.lastWakeAt(vin: nil) == nil)
 
         rig.proxy.on("POST", "/api/1/vehicles/VIN/wake_up") { _ in .json(500, #"{"error":"boom"}"#) }
         await #expect(throws: CommandError.self) { try await rig.client.wake(vin: Rig.vin) }
-        #expect(rig.client.lastWakeAt == at, "a failed wake does not move it")
+        #expect(rig.client.lastWakeAt(vin: Rig.vin) == at, "a failed wake does not move it")
     }
 
     @Test func wakeReportsWakesCategory() async throws {

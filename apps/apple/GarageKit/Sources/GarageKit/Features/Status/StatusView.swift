@@ -327,7 +327,10 @@ public struct StatusView: View {
             await app?.vehicleStore.waitUntilAwake(timeout: CommandRunner.onlineWait) ?? true
         }
         // One clock for every surface: a wake confirmed in a sheet, or from More, is Status's grace too.
-        let lastWake: @MainActor () -> Date? = { [weak app] in app?.commandClient.lastWakeAt }
+        let lastWake: @MainActor () -> Date? = { [weak app] in
+            guard let app else { return nil }
+            return app.commandClient.lastWakeAt(vin: app.vehicleStore.vehicle?.vin)
+        }
         return (send, wake, awaitAwake, lastWake)
     }
 

@@ -15,11 +15,15 @@ import Synchronization
 ///   id and is counted once. A category's new counts wait while a batch of it is still unanswered,
 ///   so there is at most one unanswered batch per category.
 /// - A 429 keeps the batch and sends it again after the window; it is not counted as a failed
-///   attempt. Other transport and 5xx failures are tried again up to `attempts` times (waiting at
-///   least `retryDelay`, doubled each time, and the window), then logged and dropped.
+///   attempt. No answer at all (offline, a token that cannot be renewed yet) keeps it too, trying
+///   again after `retryDelay` doubled each time up to ``offlineRetryMax``: the id makes the resend
+///   safe. A 5xx answer is tried again up to `attempts` times (waiting at least `retryDelay`,
+///   doubled each time, and the window), then logged and dropped; a 4xx is dropped at once.
 /// - With a ``UsageStore`` the pending counts and the formed batches are saved on every change and
 ///   picked up by the next reporter on the same store (the next launch), so a kill or a suspension
-///   loses nothing. ``discard()`` drops them (sign-out: they belong to the old account).
+///   loses nothing. A batch older than ``maxAge`` is dropped on load (the backend's memory of ids
+///   is 30 days). ``retire()`` drops them and stops the reporter for good (sign-out: they belong to
+///   the old account, and the store now belongs to the next reporter).
 /// - ``flush()`` (the app going to the background) sends what is waiting without the waits.
 ///
 /// A report that is dropped is never surfaced to the user, because the command it counts has
@@ -31,6 +35,11 @@ public final class UsageReporter: Sendable {
     public static let defaultCoalesce: Duration = .seconds(1)
     /// The most one request counts (`/api/usage` caps `count` at 100).
     public static let maxCount = 100
+    /// The longest pause between tries while the backend gives no answer.
+    public static let offlineRetryMax: Duration = .seconds(600)
+    /// A saved batch older than this is dropped on load rather than sent (the backend remembers an
+    /// id for 30 days; after that a resend would count twice).
+    public static let maxAge: TimeInterval = 25 * 24 * 3600
 
     /// One report to `/api/usage`: formed from the pending counts of one category, sent under its
     /// `id` until the backend acknowledges it.
@@ -38,11 +47,14 @@ public final class UsageReporter: Sendable {
         public let id: UUID
         public let category: UsageCategory
         public let count: Int
+        /// When the batch was formed, for ``maxAge``.
+        public let createdAt: Date
 
-        public init(id: UUID = UUID(), category: UsageCategory, count: Int) {
+        public init(id: UUID = UUID(), category: UsageCategory, count: Int, createdAt: Date = .now) {
             self.id = id
             self.category = category
             self.count = count
+            self.createdAt = createdAt
         }
     }
 
@@ -56,8 +68,12 @@ public final class UsageReporter: Sendable {
         var pending: [UsageCategory: Int] = [:]
         /// Batches formed and not yet acknowledged (or dropped), in sending order.
         var batches: [Batch] = []
-        /// Failed tries so far of each batch (429s excluded).
+        /// Failed 5xx tries so far of each batch (429s and no-answer failures excluded).
         var failures: [UUID: Int] = [:]
+        /// Consecutive sends with no answer from the backend, for the offline backoff.
+        var offlineStreak = 0
+        /// ``retire()`` was called: nothing is recorded, sent or saved any more.
+        var retired = false
         /// When the oldest pending count was recorded.
         var firstPending: ContinuousClock.Instant?
         /// When the last batch went out.
@@ -108,14 +124,14 @@ public final class UsageReporter: Sendable {
         guard let saved = store?.load(), !saved.isEmpty else { return }
         ledger.withLock { ledger in
             ledger.pending = saved.counts.filter { $0.value > 0 }
-            ledger.batches = saved.batches.filter { $0.count > 0 }
+            ledger.batches = saved.batches.filter { $0.count > 0 && Date.now.timeIntervalSince($0.createdAt) < Self.maxAge }
             if !ledger.pending.isEmpty { ledger.firstPending = .now }
             startWorker(&ledger)
         }
     }
 
     /// Reports through the Garage backend, keeping the unanswered counts in `store`.
-    public convenience init(api: GarageAPI, store: (any UsageStore)? = FileUsageStore()) {
+    public convenience init(api: GarageAPI, store: (any UsageStore)? = nil) {
         self.init(store: store) { batch in
             try await api.reportUsage(batch.category, count: batch.count, reportID: batch.id)
         }
@@ -125,6 +141,7 @@ public final class UsageReporter: Sendable {
     public func record(_ category: UsageCategory, count: Int = 1) {
         guard count > 0 else { return }
         ledger.withLock { ledger in
+            guard !ledger.retired else { return }
             ledger.pending[category, default: 0] += count
             if ledger.firstPending == nil { ledger.firstPending = .now }
             persist(ledger)
@@ -143,22 +160,41 @@ public final class UsageReporter: Sendable {
         sleeper?.cancel()
     }
 
-    /// Drops every unanswered count, here and in the store (sign-out: they belong to the account
-    /// that is leaving and would be counted against the next one). A request already in flight
-    /// finishes on its own.
+    /// Drops every unanswered count, here and in the store. A request already in flight finishes
+    /// on its own; the reporter keeps working afterwards.
     public func discard() {
         let sleeper = ledger.withLock { ledger -> Task<Void, Never>? in
-            ledger.pending = [:]
-            ledger.batches = []
-            ledger.failures = [:]
-            ledger.firstPending = nil
-            ledger.lastBatch = nil
-            ledger.retryAfter = nil
-            ledger.urgent = false
+            clear(&ledger)
             persist(ledger)
             return ledger.sleeper
         }
         sleeper?.cancel()
+    }
+
+    /// ``discard()``, then stops the reporter for good: nothing it is asked to record, nothing a
+    /// request still in flight returns, and nothing it would save reaches the store again. For
+    /// sign-out, where the counts belong to the account that is leaving and the store to the
+    /// reporter that replaces this one.
+    public func retire() {
+        let sleeper = ledger.withLock { ledger -> Task<Void, Never>? in
+            clear(&ledger)
+            persist(ledger)
+            ledger.retired = true
+            return ledger.sleeper
+        }
+        sleeper?.cancel()
+    }
+
+    /// Call under the lock.
+    private func clear(_ ledger: inout Ledger) {
+        ledger.pending = [:]
+        ledger.batches = []
+        ledger.failures = [:]
+        ledger.offlineStreak = 0
+        ledger.firstPending = nil
+        ledger.lastBatch = nil
+        ledger.retryAfter = nil
+        ledger.urgent = false
     }
 
     /// Waits until every recorded count has been delivered or given up on.
@@ -181,10 +217,22 @@ public final class UsageReporter: Sendable {
             try? await Task.sleep(for: timeout)
             gate.fire(false)
         }
-        let delivered = await withCheckedContinuation { gate.arm($0) }
+        let delivered = await withTaskCancellationHandler {
+            await withCheckedContinuation { gate.arm($0) }
+        } onCancel: {
+            gate.fire(false)
+        }
         timer.cancel()
         if !delivered { draining.cancel() }
         return delivered
+    }
+
+    /// No answer from the backend at all (a transport failure, or a token that cannot be renewed
+    /// yet): the batch is kept and tried again, with the offline backoff and no attempt counted.
+    static func isNoAnswer(_ error: any Error) -> Bool {
+        guard let error = error as? APIError else { return true }
+        if case .tokenUnavailable = error { return true }
+        return false
     }
 
     /// Transport failures, 5xx and 429 are worth another try; other 4xx answers are not.
@@ -205,8 +253,10 @@ public final class UsageReporter: Sendable {
         ledger.worker = Task { [self] in await work() }
     }
 
-    /// Writes the ledger to the store. Call under the lock, so saves land in order.
+    /// Writes the ledger to the store. Call under the lock, so saves land in order. A retired
+    /// reporter never writes: the store belongs to its successor.
     private func persist(_ ledger: Ledger) {
+        guard !ledger.retired else { return }
         store?.save(ledger.saved)
     }
 
@@ -270,20 +320,37 @@ public final class UsageReporter: Sendable {
     }
 
     private func deliver(_ batch: Batch) async {
+        // Discarded or retired since the batches were snapshotted: nothing to send.
+        guard isLive(batch) else { return }
         let label = "\(batch.category.rawValue) x\(batch.count) (\(batch.id.uuidString.prefix(8)))"
         do {
             try await send(batch)
+            ledger.withLock { $0.offlineStreak = 0 }
             settle(batch)
         } catch APIError.rateLimited {
             // Over `/api/usage`'s per-minute limit: the batch keeps its id for after the window.
             Self.log.info("usage report \(label, privacy: .public) rate limited; kept for the next window")
+        } catch where Self.isNoAnswer(error) {
+            // Nothing answered: the batch keeps its id (a reply lost after the server counted it is
+            // the id's job), and the next try waits longer each time, up to ``offlineRetryMax``.
+            let pause = ledger.withLock { ledger -> Duration? in
+                guard ledger.batches.contains(where: { $0.id == batch.id }) else { return nil }
+                ledger.offlineStreak += 1
+                let pause = min(retryDelay * (1 << min(ledger.offlineStreak - 1, 16)), Self.offlineRetryMax)
+                let retryAfter = ContinuousClock.now.advanced(by: pause)
+                ledger.retryAfter = max(ledger.retryAfter ?? retryAfter, retryAfter)
+                return pause
+            }
+            if let pause {
+                Self.log.info("usage report \(label, privacy: .public) got no answer (\(error.localizedDescription, privacy: .public)); next try in \(pause.components.seconds, privacy: .public) s")
+            }
         } catch where !Self.isRetryable(error) {
             // A client error (bad request, no session): the same report would be refused again.
             Self.log.error("usage report \(label, privacy: .public) dropped: \(error.localizedDescription, privacy: .public)")
             settle(batch)
         } catch {
+            // The backend answered with a 5xx: a few more tries, then give up.
             let attempt = ledger.withLock { ledger -> Int in
-                // Discarded while in flight: nothing to retry.
                 guard ledger.batches.contains(where: { $0.id == batch.id }) else { return 0 }
                 let attempt = (ledger.failures[batch.id] ?? 0) + 1
                 if attempt < attempts {
@@ -300,12 +367,18 @@ public final class UsageReporter: Sendable {
         }
     }
 
-    /// Removes `batch` from the ledger: acknowledged, or given up on.
+    private func isLive(_ batch: Batch) -> Bool {
+        ledger.withLock { ledger in !ledger.retired && ledger.batches.contains { $0.id == batch.id } }
+    }
+
+    /// Removes `batch` from the ledger: acknowledged, or given up on. Saves only when it was still
+    /// there (after a discard there is nothing of this reporter's left to save over).
     private func settle(_ batch: Batch) {
         ledger.withLock { ledger in
+            let before = ledger.batches.count
             ledger.batches.removeAll { $0.id == batch.id }
             ledger.failures[batch.id] = nil
-            persist(ledger)
+            if ledger.batches.count != before { persist(ledger) }
         }
     }
 }

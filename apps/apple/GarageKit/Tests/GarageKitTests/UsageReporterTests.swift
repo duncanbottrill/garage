@@ -200,6 +200,66 @@ private final class StuckLedger: Sendable {
         #expect(ledger.counts == [3, 1], "the reporter still works afterwards")
     }
 
+    /// No answer at all (offline) keeps the batch under its id without using up the attempts: the
+    /// id makes the resend safe, and the pause grows each time.
+    @Test func noAnswerKeepsTheBatchWithoutCountingAttempts() async throws {
+        let ledger = UsageLedger(replies: [URLError(.notConnectedToInternet), URLError(.timedOut), APIError.tokenUnavailable(retryAt: nil)])
+        let reporter = UsageReporter(attempts: 1, retryDelay: .milliseconds(10), interval: .milliseconds(5), coalesce: .zero) { try ledger.send($0) }
+        reporter.record(.commands, count: 2)
+        await reporter.drain()
+        #expect(ledger.counts == [2, 2, 2, 2])
+        #expect(Set(ledger.ids).count == 1, "the same id every time")
+        let calls = ledger.recorded
+        #expect(calls[2].at - calls[1].at >= .milliseconds(19), "the pause doubles")
+        #expect(calls[3].at - calls[2].at >= .milliseconds(39))
+    }
+
+    /// A retired reporter (sign-out) records nothing, sends nothing more, and never writes to the
+    /// store again, even when a request that was in flight finally returns: the store belongs to
+    /// the reporter that replaced it.
+    @Test func retireStopsTheReporterForGood() async throws {
+        let store = InMemoryUsageStore()
+        let stuck = StuckLedger()
+        let old = UsageReporter(interval: .milliseconds(20), coalesce: .zero, store: store) { await stuck.send($0) }
+        old.record(.commands, count: 2)
+        #expect(await waitFor { stuck.batches.count == 1 })
+        old.record(.wakes)
+
+        old.retire()
+        #expect(store.saved == nil)
+        old.record(.commands)
+        #expect(store.saved == nil, "nothing recorded after retiring")
+
+        // The next account's reporter takes the store.
+        let ledger = UsageLedger(replies: [APIError.rateLimited])
+        let next = UsageReporter(interval: .seconds(60), coalesce: .zero, store: store) { try ledger.send($0) }
+        next.record(.wakes, count: 3)
+        #expect(await waitFor { ledger.recorded.count == 1 })
+        let kept = try #require(store.saved)
+        #expect(kept.batches.map(\.count) == [3])
+
+        // The old request returns: its settle must not touch the store, and nothing else of the
+        // old reporter's goes out.
+        stuck.release()
+        await old.drain()
+        #expect(store.saved == kept)
+        #expect(stuck.batches.count == 1)
+        next.discard()
+        await next.drain()
+    }
+
+    /// A saved batch older than the backend's memory of ids is dropped on load, not sent.
+    @Test func oldSavedBatchIsDroppedOnLoad() async {
+        let stale = UsageReporter.Batch(category: .commands, count: 4, createdAt: Date(timeIntervalSinceNow: -40 * 24 * 3600))
+        let fresh = UsageReporter.Batch(category: .wakes, count: 1, createdAt: Date(timeIntervalSinceNow: -3600))
+        let store = InMemoryUsageStore(PendingUsage(counts: [:], batches: [stale, fresh]))
+        let ledger = UsageLedger()
+        let reporter = UsageReporter(coalesce: .zero, store: store) { try ledger.send($0) }
+        await reporter.drain()
+        #expect(ledger.ids == [fresh.id])
+        #expect(store.saved == nil)
+    }
+
     /// `drain(timeout:)` flushes, then gives up after the timeout when the backend does not answer.
     @Test func drainWithTimeoutGivesUp() async {
         let stuck = StuckLedger()

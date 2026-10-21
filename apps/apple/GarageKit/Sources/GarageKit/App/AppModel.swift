@@ -37,7 +37,7 @@ public final class AppModel {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let cache: FileSnapshotCache
     /// Where the usage counts the backend has not acknowledged wait between launches; discarded on sign-out.
-    @ObservationIgnored private let usageStore: FileUsageStore
+    @ObservationIgnored private let usageStore: any UsageStore
     @ObservationIgnored private let appleAuthorizer = AppleAuthorizer()
     @ObservationIgnored private let webAuthenticator = WebAuthenticator()
     /// The nonce for the Sign in with Apple button's request, between `onRequest` and `onCompletion`.
@@ -66,7 +66,7 @@ public final class AppModel {
     ///   - defaults: Where the chosen vehicle and onboarding completion are kept.
     ///   - cache: The snapshot cache the store opens on, cleared on sign-out.
     ///   - usageStore: Where unacknowledged usage counts wait between launches, discarded on sign-out.
-    public convenience init(environment: SupabaseEnvironment, defaults: UserDefaults = .standard, cache: FileSnapshotCache = FileSnapshotCache(), usageStore: FileUsageStore = FileUsageStore()) {
+    public convenience init(environment: SupabaseEnvironment, defaults: UserDefaults = .standard, cache: FileSnapshotCache = FileSnapshotCache(), usageStore: any UsageStore = FileUsageStore()) {
         self.init(environment: environment, defaults: defaults, cache: cache, usageStore: usageStore, checks: nil, endSession: nil)
     }
 
@@ -76,7 +76,7 @@ public final class AppModel {
         environment: SupabaseEnvironment,
         defaults: UserDefaults,
         cache: FileSnapshotCache,
-        usageStore: FileUsageStore = FileUsageStore(),
+        usageStore: any UsageStore = InMemoryUsageStore(),
         checks: OnboardingFlow.Checks?,
         endSession: (@MainActor () async -> Void)?,
         api: GarageAPI? = nil,
@@ -292,6 +292,7 @@ public final class AppModel {
     /// taken within ``signOutDrain`` is dropped with the account.
     public func signOut() async {
         _ = await commandClient.drainUsage(timeout: Self.signOutDrain)
+        commandClient.retireUsage()
         await endSession()
         resetAfterSignOut()
     }
@@ -389,8 +390,9 @@ public final class AppModel {
         vehicleStore.stop()
         commandClient.reachabilityMonitor.stop()
         reachabilityRunning = false
-        // Counts not yet acknowledged belong to this account; the next one must not inherit them.
-        commandClient.discardUsage()
+        // Counts not yet acknowledged belong to this account; the next one must not inherit them,
+        // and this client must not write to the store the next one is about to open.
+        commandClient.retireUsage()
         cache.clear()
         VehicleSelection.set(nil, in: defaults)
         // The override points at this account's bridge; the next account starts on its published URL.
@@ -415,7 +417,7 @@ public final class AppModel {
         )
     }
 
-    private static func makeCommandClient(api: GarageAPI, owner: WeakModel, session: URLSession?, usageStore: FileUsageStore) -> CommandClient {
+    private static func makeCommandClient(api: GarageAPI, owner: WeakModel, session: URLSession?, usageStore: any UsageStore) -> CommandClient {
         // Read per send and per probe, so a newly published URL or a changed override is picked up.
         let proxyBaseURL: @MainActor () -> URL? = { owner.model?.proxyBaseURL }
         let usage = UsageReporter(api: api, store: usageStore)
