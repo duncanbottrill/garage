@@ -334,7 +334,7 @@ struct ProxyExchange: Sendable {
             // Rotation is failing or in progress; it recovers on its own. Never a sign-out.
             case let .tokenUnavailable(retryAt): throw CommandError.tokenUnavailable(retryAt: retryAt)
             case .rateLimited: throw CommandError.rejected(reason: "too many requests in a short time")
-            case .asleep, .server: throw CommandError.rejected(reason: "the Garage server couldn't provide a Tesla token")
+            case .asleep, .server: throw CommandError.rejected(reason: "the Mews server couldn't provide a Tesla token")
             }
         } catch is URLError {
             throw CommandError.unreachable

@@ -49,7 +49,7 @@ public struct VehicleStep: View {
         OnboardingStepLayout(
             step: .chooseVehicle,
             title: "Choose your car",
-            message: "This is the car Garage will show and control.",
+            message: "This is the car Mews will show and control.",
             errorMessage: errorMessage
         ) {
             switch phase {
@@ -66,7 +66,7 @@ public struct VehicleStep: View {
                         icon: .carFront,
                         text: sync.conflicts.isEmpty
                             ? "No cars on this Tesla account yet."
-                            : "This car is already linked to another Garage account.",
+                            : "This car is already linked to another Mews account.",
                         tint: Tokens.Colors.warning
                     )
                     Button("Try again", action: onRetry).onboarding(.secondary)

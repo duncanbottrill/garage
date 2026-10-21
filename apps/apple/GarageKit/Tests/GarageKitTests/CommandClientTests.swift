@@ -221,10 +221,10 @@ private struct Rig {
             try await rig.client.send(.doorLock, vin: Rig.vin)
         }
         #expect(rig.proxy.requests.isEmpty)
-        #expect(CommandError.tokenUnavailable(retryAt: nil).errorDescription == "Garage is renewing its Tesla access. Try again in a few minutes.")
+        #expect(CommandError.tokenUnavailable(retryAt: nil).errorDescription == "Mews is renewing its Tesla access. Try again in a few minutes.")
         #expect(CommandError.clockTime(retryAt, timeZone: TimeZone(identifier: "Europe/London")!) == "09:15")
         let copy = CommandError.tokenUnavailable(retryAt: retryAt).errorDescription ?? ""
-        #expect(copy.hasPrefix("Garage is renewing its Tesla access. Try again in a few minutes, after "))
+        #expect(copy.hasPrefix("Mews is renewing its Tesla access. Try again in a few minutes, after "))
         #expect(copy.hasSuffix("\(CommandError.clockTime(retryAt))."))
     }
 
@@ -233,7 +233,7 @@ private struct Rig {
         rig.backend.on("GET", "/api/token") { _ in .json(401, #"{"error":"unauthorized"}"#) }
 
         await #expect(throws: CommandError.sessionExpired) { try await rig.client.send(.doorLock, vin: Rig.vin) }
-        #expect(CommandError.sessionExpired.errorDescription == "Your Garage sign-in has expired. Sign in again in More.")
+        #expect(CommandError.sessionExpired.errorDescription == "Your Mews sign-in has expired. Sign in again in More.")
 
         // No Tesla account is a Tesla problem, not a session one.
         rig.backend.on("GET", "/api/token") { _ in .json(404, #"{"error":"not_connected"}"#) }

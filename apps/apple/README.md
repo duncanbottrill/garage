@@ -1,5 +1,9 @@
 # Garage for iPhone and Mac
 
+The product name is **Mews** (App Store listing "Mews: Tesla Companion"); `Mews` is the display name and the
+word used in all user-facing copy. Everything internal keeps the working name: bundle id `com.duncanbottrill.garage`,
+URL scheme `garage://`, target `Garage`, package `GarageKit`, and the Home Assistant add-on "Garage Bridge".
+
 One multiplatform SwiftUI app target, `Garage` (iOS 26 and macOS 26, native on both, not Catalyst), around the
 local Swift package `GarageKit`, which holds the logic, views, design tokens, fonts and icons.
 

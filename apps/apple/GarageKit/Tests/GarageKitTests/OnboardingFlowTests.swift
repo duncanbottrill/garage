@@ -169,13 +169,13 @@ private func freshDefaults() -> UserDefaults {
 
         #expect(handled)
         #expect(flow.step == .connectTesla)
-        #expect(flow.lastError == "Tesla access wasn't allowed. Connect again and approve Garage's permissions.")
+        #expect(flow.lastError == "Tesla access wasn't allowed. Connect again and approve the permissions Mews asks for.")
     }
 
     @Test func callbackErrorCodesHaveFixedCopy() {
         #expect(OnboardingFlow.callbackMessage(for: "state_mismatch") == "The Tesla sign-in expired or came from another attempt. Connect again.")
         #expect(OnboardingFlow.callbackMessage(for: "bad_state") == OnboardingFlow.callbackMessage(for: "state_mismatch"))
-        #expect(OnboardingFlow.callbackMessage(for: "token_exchange_failed") == "Tesla signed you in, but Garage couldn't finish connecting. Try again in a minute.")
+        #expect(OnboardingFlow.callbackMessage(for: "token_exchange_failed") == "Tesla signed you in, but Mews couldn't finish connecting. Try again in a minute.")
         // Anything else, including raw exception text from the backend, is never shown as is.
         #expect(OnboardingFlow.callbackMessage(for: "fetch failed: <script>") == "Tesla sign-in didn't complete. Try again.")
     }

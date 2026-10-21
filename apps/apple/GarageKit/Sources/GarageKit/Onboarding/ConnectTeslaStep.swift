@@ -24,7 +24,7 @@ public struct ConnectTeslaStep: View {
         OnboardingStepLayout(
             step: .connectTesla,
             title: "Connect Tesla",
-            message: "Sign in to your Tesla account so Garage can read the car and send it commands. You'll come straight back here.",
+            message: "Sign in to your Tesla account so Mews can read the car and send it commands. You'll come straight back here.",
             errorMessage: errorMessage
         ) {
             VStack(spacing: Tokens.Space.l) {
@@ -37,7 +37,7 @@ public struct ConnectTeslaStep: View {
                 }
                 OnboardingNotice(
                     icon: .lock,
-                    text: "Garage never sees your Tesla password. Tesla asks which permissions to grant.",
+                    text: "Mews never sees your Tesla password. Tesla asks which permissions to grant.",
                     tint: Tokens.Colors.muted
                 )
             }
