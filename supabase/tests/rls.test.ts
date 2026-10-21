@@ -33,6 +33,19 @@ describe("row level security", () => {
     const { error: e2 } = await admin.rpc("increment_usage", { p_owner: a.id, p_category: "commands", p_count: 1 });
     expect(e2).toBeNull();
   });
+  it("increment_usage counts a report_id once and users cannot read usage_reports", async () => {
+    const report = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
+    const month = new Date(); const monthKey = `${month.getUTCFullYear()}-${String(month.getUTCMonth() + 1).padStart(2, "0")}-01`;
+    const read = async () => Number((await admin.from("api_usage").select("count").eq("owner_id", a.id).eq("category", "wakes").eq("month", monthKey).maybeSingle()).data?.count ?? 0);
+    const before = await read();
+    const first = await admin.rpc("increment_usage", { p_owner: a.id, p_category: "wakes", p_count: 2, p_report_id: report });
+    expect(first.error).toBeNull(); expect(first.data).toBe(true);
+    const again = await admin.rpc("increment_usage", { p_owner: a.id, p_category: "wakes", p_count: 2, p_report_id: report });
+    expect(again.error).toBeNull(); expect(again.data).toBe(false);
+    expect(await read()).toBe(before + 2);
+    const { data: mine } = await a.client.from("usage_reports").select("*");
+    expect(mine ?? []).toEqual([]);
+  });
   it("anon cannot read the current month's signals partition directly", async () => {
     const now = new Date();
     const partition = `signals_${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}`;

@@ -13,8 +13,9 @@ import Observation
 ///   the vehicle store following Realtime for up to ``onlineWait``; no polling and nothing billed),
 ///   then sends the original command once. If the row never flips, the command still goes once; an
 ///   asleep answer then reads as ``stillWakingMessage``. For ``wakeGrace`` after a wake the row's
-///   stale `asleep` does not ask again (the bridge lags the car). A command arriving during that
-///   wait joins it rather than going out early.
+///   stale `asleep` does not ask again (the bridge lags the car); a wake confirmed on another
+///   surface, or from More, counts (``lastWakeElsewhere``). A command arriving during that wait
+///   joins it rather than going out early.
 /// - **Cancel means no.** It declines every command waiting on the prompt and every command queued
 ///   behind one, and for ``declineWindow`` any further command that would need a wake is declined
 ///   without asking (so a coalesced follow-up cannot raise the prompt again). It also calls off a
@@ -94,6 +95,11 @@ public final class CommandRunner {
 
     /// Whether the car is asleep, per its row. Set by the owner after init.
     @ObservationIgnored var isAsleep: @MainActor () -> Bool = { false }
+
+    /// When the car was last woken through any surface (``CommandClient/lastWakeAt``), so the
+    /// ``wakeGrace`` after a wake confirmed in a sheet, or from More, holds here too. Set by the
+    /// owner after init; nil when nothing outside this runner can wake the car.
+    @ObservationIgnored var lastWakeElsewhere: @MainActor () -> Date? = { nil }
 
     @ObservationIgnored private let send: Send
     @ObservationIgnored private let wake: Wake
@@ -241,8 +247,8 @@ public final class CommandRunner {
     private enum WakeResult { case awake, declined, failed }
 
     private var recentlyWoke: Bool {
-        guard let wokeAt else { return false }
-        return now().timeIntervalSince(wokeAt) < Self.wakeGrace
+        guard let latest = [wokeAt, lastWakeElsewhere()].compactMap({ $0 }).max() else { return false }
+        return now().timeIntervalSince(latest) < Self.wakeGrace
     }
 
     private var recentlyDeclined: Bool {

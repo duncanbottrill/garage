@@ -1,7 +1,7 @@
 import Foundation
 
 /// A ledger category the app reports to `POST /api/usage`: one per command sent, one per wake.
-public enum UsageCategory: String, Codable, Sendable, CaseIterable {
+public enum UsageCategory: String, Codable, Sendable, CaseIterable, CodingKeyRepresentable {
     case commands
     case wakes
 }
@@ -196,11 +196,18 @@ public struct GarageAPI: Sendable {
         ).state
     }
 
-    /// `POST /api/usage`: adds `count` to this month's `category` in the usage ledger.
-    public func reportUsage(_ category: UsageCategory, count: Int = 1) async throws {
-        struct Body: Encodable { var category: UsageCategory; var count: Int }
+    /// `POST /api/usage`: adds `count` to this month's `category` in the usage ledger. A `reportID`
+    /// sent again (a lost reply, a relaunch with the batch still on disk) is counted once.
+    public func reportUsage(_ category: UsageCategory, count: Int = 1, reportID: UUID? = nil) async throws {
+        struct Body: Encodable {
+            var category: UsageCategory
+            var count: Int
+            var reportId: String?
+            enum CodingKeys: String, CodingKey { case category, count, reportId = "report_id" }
+        }
         struct Reply: Decodable {}
-        _ = try await request("POST", "api/usage", body: Body(category: category, count: count), as: Reply.self)
+        let body = Body(category: category, count: count, reportId: reportID?.uuidString.lowercased())
+        _ = try await request("POST", "api/usage", body: body, as: Reply.self)
     }
 
     // MARK: Transport

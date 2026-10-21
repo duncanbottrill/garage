@@ -110,6 +110,37 @@ import Testing
         #expect(car.sent.isEmpty)
     }
 
+    /// A wake confirmed on another surface (a sheet, More) inside the grace skips this runner's
+    /// prompt too, and the later of the two wakes is the one that counts.
+    @Test func wakeElsewhereIsThisRunnersGraceToo() async {
+        let car = FakeCar()
+        let clock = TestClock()
+        let runner = runner(car, clock: clock)
+        var elsewhere: Date? = nil
+        runner.lastWakeElsewhere = { elsewhere }
+        #expect(runner.needsWakePrompt)
+
+        elsewhere = clock.now.addingTimeInterval(-30)
+        #expect(!runner.needsWakePrompt)
+        #expect(await runner.run(.honkHorn) == .sent)
+        #expect(car.wakes == 0)
+        #expect(car.sent == [.honkHorn])
+
+        clock.advance(100) // 130 s after the other surface's wake
+        #expect(runner.needsWakePrompt)
+        elsewhere = clock.now.addingTimeInterval(-10)
+        #expect(!runner.needsWakePrompt)
+
+        // This runner's own wake counts too: the grace then runs from its time even though the
+        // other surface's wake is older.
+        elsewhere = clock.now.addingTimeInterval(-200)
+        #expect(runner.needsWakePrompt)
+        await wakeAndSend(runner)
+        #expect(car.wakes == 1)
+        clock.advance(119)
+        #expect(!runner.needsWakePrompt)
+    }
+
     /// Without a prompt on screen, a command that needs a wake is declined at once.
     @Test func noPromptHostDeclines() async {
         let car = FakeCar()
