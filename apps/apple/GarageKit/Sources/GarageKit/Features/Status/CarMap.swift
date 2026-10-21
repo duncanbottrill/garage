@@ -78,14 +78,9 @@ struct CarMap: View {
         .onMapCameraChange(frequency: .onEnd) { distance = $0.camera.distance }
     }
 
-    /// iPhone: pinch to zoom only, so the screen scrolls rather than the map. Mac: pan and zoom.
-    private static var interactionModes: MapInteractionModes {
-        #if os(iOS)
-        .zoom
-        #else
-        [.pan, .zoom]
-        #endif
-    }
+    /// Pan and zoom on both platforms; nothing scrolls under the map, so a drag belongs to it. The
+    /// camera stays where the owner put it until the car moves more than ``recentreDistance``.
+    private static let interactionModes: MapInteractionModes = [.pan, .zoom]
 
     private static func wash(around centre: CLLocationCoordinate2D) -> [CLLocationCoordinate2D] {
         let lat = centre.latitude, lng = centre.longitude, span = washSpan
