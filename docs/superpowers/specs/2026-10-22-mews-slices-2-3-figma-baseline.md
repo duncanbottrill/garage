@@ -124,14 +124,29 @@ Idles have no list. Parked time is a quiet row between drives ("Parked at home �
 
 ---
 
+## Builder-check calls (2026-10-22, mine unless marked)
+
+A designer reading this cold asked six things. Settled here so the drawings are not done twice.
+
+1. **Where charts live.** Drives and Charges have **no Analytics views**; the lists are lists. Every chart named under sections 1, 2 and 6 belongs to Insights. The **Costs page under More is dropped**; costs are a section of Insights (£ by place, off-peak share, £/kWh trend, £ per mile). More keeps only exports and settings.
+2. **States.** Each screen is drawn in its full slice-3 state plus one **first-week state** (sparse data, no routes yet, a gauge with two readings and no band). Where slice 2 differs from slice 3 (charge detail without the Octopus timeline; Insights without the Battery hero, which shows a "Battery health arrives after a few charges" card in its place), the slice-2 version is drawn too. Live, stale and bridge-offline states reuse the slice 1 patterns and are not redrawn.
+3. **Period picker on Insights.** Battery and Year are lifetime and sit outside it. The picker sits **under the Battery hero** and governs This period, Patterns, Verdicts and Costs. Each tab remembers its own period; nothing is shared between tabs.
+4. **Figma file and the slice-1 shell.** Work goes in the DataTes file on a new page **"Mews — Slices 2+3"**. Step 1 draws the shell once from the SwiftUI views as built (tab bar, Status, More), as thin reference frames rather than a redesign, so new screens sit in context. The Status change from section 6 ("cheap rate now / next cheap slot") is a small frame in step 3. *A full redesign pass of the slice-1 screens remains a separate job.* **(Duncan to confirm.)**
+5. **Mac sidebar.** Status, Drives, Charges, Insights, Battery (scrolls Insights to its Battery section; no separate screen), Places, Settings. More becomes Settings on Mac; exports live there.
+6. **Settings the numbers depend on.** A **Data & costs** group under More / Settings: default £/kWh, Octopus account (slice 3, its own connect sheet), comparison petrol car, battery original capacity (default from the model, overridable), battery replacement date. Manual Supercharger cost is **Set cost** in the charge detail. All drawn in step 6.
+
+Small point: the sleep-shaded "battery level" chart is the **overnight-loss chart in Insights** and the mini battery-level chart in the parked-row detail; there is no separate battery-level-over-time screen.
+
+---
+
 ## Order of work in Figma
 
 1. Navigation frame and shared parts: period picker, list row, numbers band, chart card, place chip, coloured route. Components only with Duncan's go-ahead, as variants of one set each.
 2. Drives: list (with parked rows), detail with the coloured route and Conditions strip, analytics.
 3. Charges: live card, list, the two detail orderings (DC curve-first, AC numbers-first), Octopus night timeline, analytics.
 4. Places: list with Home and Work pinned, the place sheet with disabled Preferences.
-5. Insights: Battery gauge and charts with sleep shading, period summary, patterns, verdicts, year view.
-6. More additions: Costs page, exports.
+5. Insights: Battery gauge and charts with sleep shading, period picker, This period, Patterns, Verdicts, Costs, Year; plus the slice-2 version without Battery.
+6. More / Settings: Data & costs group (default tariff, Octopus connect sheet, comparison car, original capacity), exports; Set cost sheet on the charge detail.
 7. Wall iPad, landscape, read-only.
 8. Mac layouts of 2 to 5.
 
