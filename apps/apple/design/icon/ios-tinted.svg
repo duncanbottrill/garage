@@ -1,0 +1,20 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><defs><clipPath id="ntintedAsq"><path d="M0 512C0 150 150 0 512 0S1024 150 1024 512 874 1024 512 1024 0 874 0 512Z"/></clipPath><clipPath id="ntintedAbc"><path d="M548 500 L476 500 L432 756 L496 756 L474 910 L582 700 L520 700 Z"/></clipPath>
+    
+    <linearGradient id="ntintedAm" x1="0" y1="0" x2="0" y2="1"><stop offset=".3" stop-color="#F8FBFF"/><stop offset="1" stop-color="#8CA2BB"/></linearGradient>
+    <linearGradient id="ntintedAbf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#B9C4D2"/></linearGradient>
+    <radialGradient id="ntintedApool" cx="50%" cy="100%" r="56%"><stop offset="0" stop-color="#4FE3FF" stop-opacity=".5"/><stop offset="1" stop-color="#4FE3FF" stop-opacity="0"/></radialGradient>
+    <radialGradient id="ntintedArl" cx="512" cy="730" r="330" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>
+    <mask id="ntintedArm"><rect width="1024" height="1024" fill="url(#ntintedArl)"/></mask>
+    <linearGradient id="ntintedAgloss" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <filter id="ntintedAsh" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="22"/></filter><filter id="ntintedAb1" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="34"/></filter><filter id="ntintedAb2" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="9"/></filter><filter id="ntintedAseam" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="9"/></filter></defs><g clip-path="url(#ntintedAsq)"><rect width="1024" height="1024" fill="none"/>
+    <path d="M548 500 L476 500 L432 756 L496 756 L474 910 L582 700 L520 700 Z" fill="#C9D3E0" opacity=".6" filter="url(#ntintedAb1)" transform="translate(0,10)"/>
+        <path d="M548 500 L476 500 L432 756 L496 756 L474 910 L582 700 L520 700 Z" fill="#C9D3E0" opacity=".9" filter="url(#ntintedAb2)"/>
+        <path d="M548 500 L476 500 L432 756 L496 756 L474 910 L582 700 L520 700 Z" fill="url(#ntintedAbf)" stroke="url(#ntintedAbf)" stroke-width="12" stroke-linejoin="round"/>
+        <path d="M484 520 L446 740" stroke="#fff" stroke-opacity=".55" stroke-width="6" stroke-linecap="round"/>
+        <path d="M172 1100 V520 C172 400 250 330 342 330 C434 330 512 400 512 520 C512 400 590 330 682 330 C774 330 852 400 852 520 V1100" fill="none" stroke="#000" stroke-opacity=".55" stroke-width="88" filter="url(#ntintedAseam)" clip-path="url(#ntintedAbc)" transform="translate(0,14)"/>
+    <path d="M172 1100 V520 C172 400 250 330 342 330 C434 330 512 400 512 520 C512 400 590 330 682 330 C774 330 852 400 852 520 V1100" fill="none" stroke="#000" stroke-opacity="0" stroke-width="84" stroke-linecap="round" stroke-linejoin="round" filter="url(#ntintedAsh)" transform="translate(0,26)"/>
+    <path d="M172 1100 V520 C172 400 250 330 342 330 C434 330 512 400 512 520 C512 400 590 330 682 330 C774 330 852 400 852 520 V1100" fill="none" stroke="#D7DEE8" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/>
+    
+    <path d="M190 1100 V520 C190 410 262 348 342 348 C422 348 494 410 494 520 M530 520 C530 410 602 348 682 348 C762 348 834 410 834 520 V1100" fill="none" stroke="#fff" stroke-opacity=".3" stroke-width="5" stroke-linecap="round"/>
+    
+    </g></svg>
