@@ -7,6 +7,27 @@ URL scheme `garage://`, target `Garage`, package `GarageKit`, and the Home Assis
 One multiplatform SwiftUI app target, `Garage` (iOS 26 and macOS 26, native on both, not Catalyst), around the
 local Swift package `GarageKit`, which holds the logic, views, design tokens, fonts and icons.
 
+## TestFlight (iOS)
+
+Archive in Release, then export with `destination: upload`, which signs with a distribution certificate and
+uploads in one step. `xcodebuild` cannot use the Xcode account session for this, so it needs an App Store
+Connect API key (Users and Access → Integrations → App Store Connect API → Team Keys, role App Manager).
+Keep the `.p8` under `~/.garage/` (git-ignored, never committed) and pass its Key ID and Issuer ID:
+
+```sh
+xcodebuild archive -project Garage.xcodeproj -scheme Garage -configuration Release \
+  -destination 'generic/platform=iOS' -archivePath build/Mews-iOS.xcarchive -derivedDataPath build -allowProvisioningUpdates
+xcodebuild -exportArchive -archivePath build/Mews-iOS.xcarchive -exportOptionsPlist ExportOptions.plist \
+  -exportPath build/export-ios -allowProvisioningUpdates \
+  -authenticationKeyPath ~/.garage/AuthKey_<KEYID>.p8 -authenticationKeyID <KEYID> -authenticationKeyIssuerID <ISSUER>
+```
+
+`ExportOptions.plist` (committed, next to `project.yml`): method `app-store-connect`, destination `upload`,
+automatic signing, `manageAppVersionAndBuildNumber` on, so App Store Connect bumps the build number when the
+same one is uploaded twice. Processing takes a few minutes; the build then shows under TestFlight, and the first
+tester has to be added by hand (Internal Testing group). `ITSAppUsesNonExemptEncryption` is false in Info.plist, so
+there is no export-compliance prompt.
+
 ## Setup
 
 ```sh
