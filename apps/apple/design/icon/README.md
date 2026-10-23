@@ -1,6 +1,6 @@
 # Mews app icon
 
-Source of truth is `mews-icon.py` (`centred(mode, 1.8, 22)` builds the SVG for each appearance; `mews_icon_base.py` holds the shared geometry). The four SVGs here are its output:
+Source of truth is `mews-icon.py` (`centred(mode, 1.6, 22)` builds the SVG for each appearance; `mews_icon_base.py` holds the shared geometry). The four SVGs here are its output:
 
 | File | Used for |
 |---|---|
