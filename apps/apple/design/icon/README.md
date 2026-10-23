@@ -14,7 +14,6 @@ Regenerate the asset catalogue:
 ```bash
 swiftc -O -o /tmp/svg2png svg2png.swift && swiftc -O -o /tmp/strip strip.swift
 A=../../Garage/Assets.xcassets/AppIcon.appiconset
-python3 -c "from mews_icon import *" 2>/dev/null || true
 /tmp/svg2png ios-default.svg 1024 $A/AppIcon-1024.png && /tmp/strip $A/AppIcon-1024.png $A/AppIcon-1024.png
 /tmp/svg2png ios-dark.svg 1024 $A/AppIcon-1024-dark.png && /tmp/strip $A/AppIcon-1024-dark.png $A/AppIcon-1024-dark.png
 /tmp/svg2png ios-tinted.svg 1024 $A/AppIcon-1024-tinted.png
