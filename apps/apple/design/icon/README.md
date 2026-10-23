@@ -1,6 +1,6 @@
 # Mews app icon
 
-Source of truth is `mews-icon.py` (`night()` builds the SVG for each appearance). The four SVGs here are its output:
+Source of truth is `mews-icon.py` (`centred(mode, 1.8, 22)` builds the SVG for each appearance; `mews_icon_base.py` holds the shared geometry). The four SVGs here are its output:
 
 | File | Used for |
 |---|---|
@@ -20,4 +20,4 @@ A=../../Garage/Assets.xcassets/AppIcon.appiconset
 for s in 16 32 64 128 256 512 1024; do /tmp/svg2png mac.svg $s $A/mac-$s.png; done
 ```
 
-Mark: a lowercase m drawn as two coach-house arches (a mews) with the bolt as its third leg, behind the arches. Field is the app's dark blue, accent #4FE3FF.
+Mark: a lowercase m drawn as two coach-house arches (a mews) with the bolt centred behind it, the m cutting through the bolt with a 22px gap. Field is the app's dark blue, accent #4FE3FF.
